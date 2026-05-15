@@ -1,0 +1,27 @@
+# Generated C files
+app.c
+
+# Build artifacts
+/build/
+*.o
+*.so
+*.dylib
+*.dll
+*.a
+
+# Editor files
+.vscode/
+.idea/
+.cache/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Package manager
+Cxyfile.lock
+.cxy/
+.build/

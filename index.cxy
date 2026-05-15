@@ -1,0 +1,3 @@
+package rtl
+
+export { hello } from "./src/hello.cxy"

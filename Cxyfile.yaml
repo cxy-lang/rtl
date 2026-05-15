@@ -1,0 +1,11 @@
+package:
+  name: rtl
+  version: 0.1.0
+  author: Carter Mbotho<lastcarter@gmail.com>
+  description: A simple system level modeling library
+  license: MIT
+
+dependencies: []
+
+tests:
+  - file: "src/**/*.cxy"
