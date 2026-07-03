@@ -1,0 +1,45 @@
+import { Clock } from "../src/clock.cxy"
+import { ns } from "../src/time.cxy"
+import { Signal } from "../src/signal.cxy"
+import { simContext } from "../src/sim-context.cxy"
+import { Bit } from "../src/bit.cxy"
+import { InPort, OutPort } from "../src/ports.cxy"
+
+import plugin "rtl" as rtl
+
+@rtl::component
+class Counter {
+    @input clk: Clock
+    @input reset: Bit
+    @output out: u32
+
+    _value: u32 = 0
+
+    @method(clk: "posedge")
+    func count() {
+        if *reset == 1 {
+            _value = 0
+        } else {
+            _value += 1
+        }
+        out << _value
+    }
+}
+
+func main() {
+    var ctx = simContext()
+    var clk = Clock("clk", 10.ns)
+    var sig = Signal[u32](0)
+    var reset = Signal[Bit](0)
+    clk.start()
+    var counter = Counter(&clk, reset, sig)
+    reset << 1
+    ctx.run(20.ns)
+    println("Count is ", sig.read())
+    reset << 0
+    ctx.run(100.ns)
+    println("Count is ", sig.read())
+    reset << 0
+    ctx.run(20.ns)
+    println("Count is ", sig.read())
+}

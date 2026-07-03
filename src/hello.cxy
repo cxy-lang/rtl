@@ -1,9 +1,0 @@
-module hello
-
-pub func hello(name: string) {
-  return f"Hello, {name}!"
-}
-
-test "hello test" {
-  ok!(hello("World") == "Hello, World!")
-}

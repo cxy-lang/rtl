@@ -1,0 +1,1048 @@
+module bitvector
+
+import { Bit } from "./bit.cxy"
+import { simContext } from "./sim-context.cxy"
+import { Vector } from "stdlib/vector.cxy"
+
+/**
+ * BitVectorBase - Base class for bit vectors with shared storage and offset
+ *
+ * Provides storage (`Vector[Bit]`) with `_offset` field for slicing.
+ * Common operations work for any bit vector regardless of width.
+ *
+ * Subclasses (BitVector[N]) provide type-safe access with compile-time width.
+ */
+pub class BitVectorBase {
+    `IsBitVector = true  // Marker for plugin detection
+
+    _bits: Vector[Bit]   // Shared storage
+    _offset: u64 = 0     // Offset into storage (for slices)
+
+    func `init`() {
+        _bits = Vector[Bit]()
+        _offset = 0
+    }
+
+    // Virtual width - subclasses override with compile-time known value
+    virtual const func width(): u64 {
+        return _bits.size()
+    }
+
+    // ========================================================================
+    // Bit Access (automatically uses offset)
+    // ========================================================================
+
+    const func getBit(index: u64): Bit {
+        return __copy!(_bits.[(_offset + index) as i32])
+    }
+
+    func setBit(index: u64, value: Bit) {
+        _bits.[(_offset + index) as i32] = value
+    }
+
+    // ========================================================================
+    // Bitwise Operations
+    // ========================================================================
+
+    func bitwiseAnd(other: &const BitVectorBase, result: &BitVectorBase) {
+        var w = width()
+        for i in 0..w {
+            result.setBit(i, getBit(i) & other.getBit(i))
+        }
+    }
+
+    func bitwiseOr(other: &const BitVectorBase, result: &BitVectorBase) {
+        var w = width()
+        for i in 0..w {
+            result.setBit(i, getBit(i) | other.getBit(i))
+        }
+    }
+
+    func bitwiseXor(other: &const BitVectorBase, result: &BitVectorBase) {
+        var w = width()
+        for i in 0..w {
+            result.setBit(i, getBit(i) ^ other.getBit(i))
+        }
+    }
+
+    func bitwiseNot(result: &BitVectorBase) {
+        var w = width()
+        for i in 0..w {
+            result.setBit(i, ~getBit(i))
+        }
+    }
+
+    // ========================================================================
+    // Conversion to Integers
+    // ========================================================================
+
+    const func _toU64(): u64 {
+        var result: u64 = 0
+        var w = width()
+        var bits_to_read = w < 64 ? w : 64
+
+        for i in 0..bits_to_read {
+            if getBit(i).value == '1' {
+                result |= (1 << i)
+            }
+        }
+        return result
+    }
+
+    const func _toI64(): i64 {
+        var val = _toU64()
+        var w = width()
+
+        if w < 64 && w > 0 && getBit(w - 1).value == '1' {
+            var sign_bits = ((1 as u64) << w) - 1
+            val |= ~sign_bits
+        }
+        return val as i64
+    }
+
+    // ========================================================================
+    // String Conversions
+    // ========================================================================
+
+    const func toBinary(): String {
+        var s = String()
+        var w = width()
+
+        for i in 0..w {
+            var idx = w - 1 - i  // MSB first
+            s << getBit(idx).value
+        }
+        return s
+    }
+
+    const func toHex(os: &OutputStream) {
+        var w = width()
+        var nibbles = (w + 3) / 4
+
+        for n in 0..nibbles {
+            var nibble_idx = nibbles - 1 - n
+            var bit_idx = nibble_idx * 4
+
+            var has_x = false
+            var has_z = false
+            for b in 0..4 {
+                if bit_idx + b < w {
+                    var bit_val = getBit(bit_idx + b).value
+                    if bit_val == 'X' {
+                        has_x = true
+                    }
+                    if bit_val == 'Z' {
+                        has_z = true
+                    }
+                }
+            }
+
+            if has_x {
+                os << 'X'
+            } else if has_z {
+                os << 'Z'
+            } else {
+                var val: u32 = 0
+                for b in 0..4 {
+                    if bit_idx + b < w && getBit(bit_idx + b).value == '1' {
+                        val |= (1 << b)
+                    }
+                }
+                os << hexChar(val)
+            }
+        }
+    }
+
+    func toHex(): String {
+        var s = String()
+        toHex(&s)
+        return &&s
+    }
+
+    func hexChar(val: u32): wchar {
+        if val < 10 {
+            return ('0' as u32 + val) as wchar
+        }
+        return ('A' as u32 + (val - 10)) as wchar
+    }
+}
+
+// ============================================================================
+// Tests for BitVectorBase
+// ============================================================================
+
+test "BitVectorBase creation and width" {
+    var base = BitVectorBase()
+    ok!(base.width() == 0)
+
+    base._bits.push(Bit('0'))
+    base._bits.push(Bit('1'))
+    base._bits.push(Bit('X'))
+
+    ok!(base.width() == 3)
+}
+
+test "BitVectorBase bit access" {
+    var base = BitVectorBase()
+    base._bits.push(Bit('0'))
+    base._bits.push(Bit('1'))
+    base._bits.push(Bit('X'))
+
+    ok!(base.getBit(0).value == '0')
+    ok!(base.getBit(1).value == '1')
+    ok!(base.getBit(2).value == 'X')
+
+    base.setBit(0, Bit('1'))
+    ok!(base.getBit(0).value == '1')
+}
+
+test "BitVectorBase bitwise AND" {
+    var a = BitVectorBase()
+    var b = BitVectorBase()
+    var result = BitVectorBase()
+
+    a._bits.push(Bit('0'))
+    a._bits.push(Bit('1'))
+    a._bits.push(Bit('0'))
+    a._bits.push(Bit('1'))
+
+    b._bits.push(Bit('0'))
+    b._bits.push(Bit('0'))
+    b._bits.push(Bit('1'))
+    b._bits.push(Bit('1'))
+
+    for i in 0..4 {
+        result._bits.push(Bit('0'))
+    }
+
+    a.bitwiseAnd(&b, &result)
+    ok!(result.getBit(0).value == '0')
+    ok!(result.getBit(1).value == '0')
+    ok!(result.getBit(2).value == '0')
+    ok!(result.getBit(3).value == '1')
+}
+
+test "BitVectorBase bitwise OR" {
+    var a = BitVectorBase()
+    var b = BitVectorBase()
+    var result = BitVectorBase()
+
+    a._bits.push(Bit('0'))
+    a._bits.push(Bit('1'))
+    a._bits.push(Bit('0'))
+    a._bits.push(Bit('1'))
+
+    b._bits.push(Bit('0'))
+    b._bits.push(Bit('0'))
+    b._bits.push(Bit('1'))
+    b._bits.push(Bit('1'))
+
+    for i in 0..4 {
+        result._bits.push(Bit('0'))
+    }
+
+    a.bitwiseOr(&b, &result)
+    ok!(result.getBit(0).value == '0')
+    ok!(result.getBit(1).value == '1')
+    ok!(result.getBit(2).value == '1')
+    ok!(result.getBit(3).value == '1')
+}
+
+test "BitVectorBase bitwise NOT" {
+    var a = BitVectorBase()
+    var result = BitVectorBase()
+
+    a._bits.push(Bit('0'))
+    a._bits.push(Bit('1'))
+    a._bits.push(Bit('0'))
+    a._bits.push(Bit('1'))
+
+    for i in 0..4 {
+        result._bits.push(Bit('0'))
+    }
+
+    a.bitwiseNot(&result)
+    ok!(result.getBit(0).value == '1')
+    ok!(result.getBit(1).value == '0')
+    ok!(result.getBit(2).value == '1')
+    ok!(result.getBit(3).value == '0')
+}
+
+test "BitVectorBase toU64" {
+    var base = BitVectorBase()
+
+    base._bits.push(Bit('0'))
+    base._bits.push(Bit('1'))
+    base._bits.push(Bit('0'))
+    base._bits.push(Bit('1'))
+
+    ok!(base._toU64() == 10)
+}
+
+test "BitVectorBase toI64 positive" {
+    var base = BitVectorBase()
+
+    // 0101 = 5 decimal, MSB (bit 3) is 0 so positive
+    base._bits.push(Bit('1'))
+    base._bits.push(Bit('0'))
+    base._bits.push(Bit('1'))
+    base._bits.push(Bit('0'))
+
+    ok!(base._toI64() == 5)
+}
+
+test "BitVectorBase toBinary" {
+    var base = BitVectorBase()
+
+    base._bits.push(Bit('0'))
+    base._bits.push(Bit('1'))
+    base._bits.push(Bit('0'))
+    base._bits.push(Bit('1'))
+
+    var str = base.toBinary()
+    ok!(str == "1010")
+}
+
+test "BitVectorBase toHex" {
+    var base = BitVectorBase()
+
+    base._bits.push(Bit('1'))
+    base._bits.push(Bit('1'))
+    base._bits.push(Bit('1'))
+    base._bits.push(Bit('1'))
+
+    var str = base.toHex()
+    ok!(str == "F")
+}
+
+test "BitVectorBase toHex with X" {
+    var base = BitVectorBase()
+
+    base._bits.push(Bit('1'))
+    base._bits.push(Bit('X'))
+    base._bits.push(Bit('1'))
+    base._bits.push(Bit('1'))
+
+    var str = base.toHex()
+    ok!(str == "X")
+}
+
+// ============================================================================
+// BitVector[N] - Typed view with compile-time width
+// ============================================================================
+
+/**
+ * BitVector[N] - Typed bit vector with compile-time width N
+ *
+ * N = actual width of THIS vector (not parent storage size)
+ * Internal _offset field tracks position in shared storage for slices
+ *
+ * This is a class (reference type), so slices automatically share storage
+ * via reference counting. Creating a slice with slice[L, H]() returns
+ * BitVector[#{H - L}] sharing the same underlying Vector[Bit].
+ *
+ * Examples:
+ *   var vec = BitVector[8](0xAB)         // 8-bit vector
+ *   var slice = vec.slice[2, 6]()        // Returns BitVector[4] (not [8, 2, 6]!)
+ *   slice.[0] = '1'                      // Modifies bit 2 of vec!
+ */
+pub class BitVector[N] : BitVectorBase {
+    `IsBitVector = true  // Plugin marker
+
+    // ========================================================================
+    // Constructors
+    // ========================================================================
+
+    // Constructor 1: Allocate N bits (default - all zeros)
+    func `init`() {
+        super()
+        _bits = Vector[Bit]()
+        _offset = 0
+        for i in 0..#{N.value} {
+            _bits.push(Bit('0'))
+        }
+    }
+
+    // Constructor 2: From existing storage with offset (for slices)
+    @private
+    func `init`(storage: Vector[Bit], offset: u64) {
+        super()
+        _bits = &&storage  // Share reference!
+        _offset = offset
+    }
+
+    // Constructor 3: From unsigned integer
+    func `init`(value: u64) {
+        super()
+        _bits = Vector[Bit]()
+        _offset = 0
+        for i in 0..#{N.value} {
+            var bit_val = (value >> i) & 1
+            _bits.push(Bit(bit_val as u32))
+        }
+    }
+
+    // Constructor 4: From signed integer
+    func `init`(value: i64) {
+        op__init(value as u64)
+    }
+
+    // Constructor 5: From string (auto-detects binary/hex)
+    func `init`(str: string) {
+        super()
+        _bits = Vector[Bit]()
+        _offset = 0
+
+        // Allocate storage
+        for i in 0..#{N.value} {
+            _bits.push(Bit('0'))
+        }
+
+        // Check for 0b/0x prefix
+        var start_idx: u64 = 0
+        var is_hex = false
+
+        if len!(str) >= 2 {
+            if (str.[0] == '0' && (str.[1] == 'b' || str.[1] == 'B')) {
+                start_idx = 2
+                is_hex = false
+            } else if (str.[0] == '0' && (str.[1] == 'x' || str.[1] == 'X')) {
+                start_idx = 2
+                is_hex = true
+            }
+        }
+
+        if is_hex {
+            parseHexString(str, start_idx)
+        } else {
+            parseBinaryString(str, start_idx)
+        }
+    }
+
+    // Helper: parse binary string (MSB first in string)
+    func parseBinaryString(str: string, start_idx: u64): void {
+        // Count valid bits
+        const size = len!(str)
+        var bit_count: u64 = 0
+        for i in start_idx..size {
+            var ch = str.[i]
+            if ch != '_' && ch != ' ' {
+                bit_count += 1
+            }
+        }
+
+        assert!(bit_count == #{N.value}, "Binary string length doesn't match vector width")
+
+        // Parse from MSB to LSB (string is MSB first, storage is LSB first)
+        var bit_idx: i64 = #{N.value} as i64 - 1
+        for i in start_idx..size {
+            var ch = str.[i]
+            if ch == '_' || ch == ' ' {
+                continue
+            }
+
+            switch ch {
+                '0' => _bits.[bit_idx as i32] = Bit('0')
+                '1' => _bits.[bit_idx as i32] = Bit('1')
+                'x', 'X' => _bits.[bit_idx as i32] = Bit('X')
+                'z', 'Z' => _bits.[bit_idx as i32] = Bit('Z')
+                ... => {
+                    assert!(false, "Invalid bit character in binary string")
+                }
+            }
+            bit_idx -= 1
+        }
+    }
+
+    // Helper: parse hex string (MSB first in string)
+    func parseHexString(str: string, start_idx: u64): void {
+        // Count nibbles
+        var nibble_count: u64 = 0
+        const size = len!(str)
+        for i in start_idx..size {
+            if str.[i] != '_' && str.[i] != ' ' {
+                nibble_count += 1
+            }
+        }
+
+        var expected_nibbles = (#{N.value} + 3) / 4
+        assert!(nibble_count == expected_nibbles, "Hex string length doesn't match vector width")
+
+        // Parse nibbles from MSB to LSB
+        var nibble_idx: i64 = nibble_count as i64 - 1
+        for i in start_idx..size {
+            var ch = str.[i]
+            if ch == '_' || ch == ' ' {
+                continue
+            }
+
+            var nibble_val = hexCharToValue(ch)
+            var bit_base = (nibble_idx as u64) * 4
+
+            if nibble_val >= 0 {
+                // Valid hex digit 0-15
+                for bit in 0..4 {
+                    if bit_base + bit < #{N.value} {
+                        var bit_val = (nibble_val >> bit) & 1
+                        _bits.[(bit_base + bit) as i32] = Bit(bit_val as u32)
+                    }
+                }
+            } else if nibble_val == -1 {
+                // X nibble
+                for bit in 0..4 {
+                    if bit_base + bit < #{N.value} {
+                        _bits.[(bit_base + bit) as i32] = Bit('X')
+                    }
+                }
+            } else {
+                // Z nibble
+                for bit in 0..4 {
+                    if bit_base + bit < #{N.value} {
+                        _bits.[(bit_base + bit) as i32] = Bit('Z')
+                    }
+                }
+            }
+
+            nibble_idx -= 1
+        }
+    }
+
+    // Helper: convert hex character to value (-1 for X, -2 for Z)
+    func hexCharToValue(ch: wchar): i32 {
+        if ch >= '0' && ch <= '9' {
+            return (ch - '0') as i32
+        }
+        if ch >= 'a' && ch <= 'f' {
+            return (ch - 'a' + 10) as i32
+        }
+        if ch >= 'A' && ch <= 'F' {
+            return (ch - 'A' + 10) as i32
+        }
+        if ch == 'x' || ch == 'X' {
+            return -1
+        }
+        if ch == 'z' || ch == 'Z' {
+            return -2
+        }
+        assert!(false, "Invalid hex character")
+        return 0
+    }
+
+    // ========================================================================
+    // Width (compile-time constant)
+    // ========================================================================
+
+    @override
+    const func width(): u64 {
+        return #{N.value}
+    }
+
+    // ========================================================================
+    // Indexing (uses offset automatically via getBit/setBit)
+    // ========================================================================
+
+    const func `[]`(index: u64): Bit {
+        assert!(index < #{N.value}, "Index out of bounds")
+        return getBit(index)
+    }
+
+    func at[I](): Bit {
+        require!(#{I.value} < #{N.value}, "Index out of bounds")
+        return getBit(#{I.value})
+    }
+
+    func `[]=`(index: u64, value: Bit) {
+        assert!(index < #{N.value}, "Index out of bounds")
+        setBit(index, value)
+    }
+
+    func `[]=`(index: u64, value: wchar) {
+        assert!(index < #{N.value}, "Index out of bounds")
+        setBit(index, Bit(value))
+    }
+
+    func `[]=`(index: u64, value: u32) {
+        assert!(index < #{N.value}, "Index out of bounds")
+        setBit(index, Bit(value))
+    }
+
+    func set[I, T](value: T) {
+        require!(#{I.value} < #{N.value}, "Index out of bounds")
+        #if T == #Bit {
+            setBit(#{I.value}, value)
+        } else #if T.isChar || T.isInteger {
+            setBit(#{I.value}, Bit(value))
+        } else {
+            error!("Unsupported type: #{t}", #T)
+        }
+    }
+
+    const func `as`[T](): T {
+        require!(T.isInteger, "type {t} is not an integer type", T)
+        #if T.isSigned {
+            return _toI64() as T
+        } else {
+            return _toU64() as T
+        }
+    }
+
+    // ========================================================================
+    // Slicing - returns BitVector[#{H - L}] with correct width
+    // ========================================================================
+
+    func slice[L, H]() {
+        require!(#{L.value} < #{H.value} && #{H.value} <= #{N.value},
+                 "Slice [L, H] must satisfy: 0 <= L < H <= N")
+        #const NewN = H.value - L.value
+        return BitVector[#{NewN}](_bits, _offset + #{L.value})
+    }
+
+    // ========================================================================
+    // Bitwise Operators - create new vectors
+    // ========================================================================
+
+    func `&`(other: &const This): This {
+        var result = This()
+        bitwiseAnd(other, &result)
+        return result
+    }
+
+    func `|`(other: &const This): This {
+        var result = This()
+        bitwiseOr(other, &result)
+        return result
+    }
+
+    func `^`(other: &const This): This {
+        var result = This()
+        bitwiseXor(other, &result)
+        return result
+    }
+
+    func `~`(): This {
+        var result = This()
+        bitwiseNot(&result)
+        return result
+    }
+
+    // ========================================================================
+    // Arithmetic Operators
+    // ========================================================================
+
+    func `+`(other: &const This): This {
+        var sum = _toU64() + other._toU64()
+        return This(sum)
+    }
+
+    func `-`(other: &const This): This {
+        var diff = _toU64() - other._toU64()
+        return This(diff)
+    }
+
+    // ========================================================================
+    // Comparison Operators
+    // ========================================================================
+
+    func `==`(other: &const This): bool {
+        for i in 0..#{N.value} {
+            if !(this.[i] == other.[i]) {
+                return false
+            }
+        }
+        return true
+    }
+
+    func `!=`(other: &const This): bool {
+        return !(this == other)
+    }
+
+    // ========================================================================
+    // String Conversion
+    // ========================================================================
+
+    const func `str`(os: &OutputStream) {
+        toHex(os)
+    }
+}
+
+// ============================================================================
+// Tests for BitVector[N]
+// ============================================================================
+
+test "BitVector[N] default construction" {
+    var bv = BitVector[8]()
+    ok!(bv.width() == 8)
+
+    for i in 0..8 {
+        ok!(bv.[i].value == '0')
+    }
+}
+
+test "BitVector[N] from u64" {
+    var bv = BitVector[8](0xAB)  // 10101011
+    ok!(bv.width() == 8)
+
+    ok!(bv.[0].value == '1')
+    ok!(bv.[1].value == '1')
+    ok!(bv.[2].value == '0')
+    ok!(bv.[3].value == '1')
+    ok!(bv.[4].value == '0')
+    ok!(bv.[5].value == '1')
+    ok!(bv.[6].value == '0')
+    ok!(bv.[7].value == '1')
+}
+
+test "BitVector[N] from i64" {
+    var bv = BitVector[8](-1.i64)
+    ok!(bv.width() == 8)
+
+    for i in 0..8 {
+        ok!(bv.[i].value == '1')
+    }
+}
+
+test "BitVector[N] indexing read" {
+    var bv = BitVector[4](0b1010)
+
+    ok!(bv.[0].value == '0')
+    ok!(bv.[1].value == '1')
+    ok!(bv.[2].value == '0')
+    ok!(bv.[3].value == '1')
+}
+
+test "BitVector[N] indexing write with Bit" {
+    var bv = BitVector[4]()
+
+    bv.[0] = Bit('1')
+    bv.[1] = Bit('0')
+    bv.[2] = Bit('X')
+    bv.[3] = Bit('Z')
+
+    ok!(bv.[0].value == '1')
+    ok!(bv.[1].value == '0')
+    ok!(bv.[2].value == 'X')
+    ok!(bv.[3].value == 'Z')
+}
+
+test "BitVector[N] indexing write with wchar" {
+    var bv = BitVector[4]()
+
+    bv.[0] = '1'
+    bv.[1] = 'X'
+    bv.[2] = 'Z'
+    bv.[3] = '0'
+
+    ok!(bv.[0].value == '1')
+    ok!(bv.[1].value == 'X')
+    ok!(bv.[2].value == 'Z')
+    ok!(bv.[3].value == '0')
+}
+
+test "BitVector[N] indexing write with u32" {
+    var bv = BitVector[4]()
+
+    bv.[0] = 1 as u32
+    bv.[1] = 0 as u32
+
+    ok!(bv.[0].value == '1')
+    ok!(bv.[1].value == '0')
+}
+
+test "BitVector[N] slice creates correctly-sized slice" {
+    var bv = BitVector[8](0xAB)  // 10101011
+
+    var lower = bv.slice[0, 4]()
+    ok!(lower.width() == 4)  // Type is BitVector[4]!
+    ok!(lower.[0].value == '1')
+    ok!(lower.[1].value == '1')
+    ok!(lower.[2].value == '0')
+    ok!(lower.[3].value == '1')
+
+    var upper = bv.slice[4, 8]()
+    ok!(upper.width() == 4)  // Type is BitVector[4]!
+    ok!(upper.[0].value == '0')
+    ok!(upper.[1].value == '1')
+    ok!(upper.[2].value == '0')
+    ok!(upper.[3].value == '1')
+}
+
+test "BitVector[N] slice shares storage" {
+    var bv = BitVector[8](0x00)
+    var slice = bv.slice[2, 6]()  // BitVector[4]
+
+    slice.[0] = '1'
+    slice.[1] = '1'
+
+    ok!(bv.[2].value == '1')
+    ok!(bv.[3].value == '1')
+}
+
+test "BitVector[N] nested slices" {
+    var bv = BitVector[16](0xABCD)
+
+    var lower_byte = bv.slice[0, 8]()  // BitVector[8]
+    ok!(lower_byte.width() == 8)
+
+    var lower_nibble = lower_byte.slice[0, 4]()  // BitVector[4]
+    ok!(lower_nibble.width() == 4)
+
+    ok!(lower_nibble.[0].value == '1')
+    ok!(lower_nibble.[1].value == '0')
+    ok!(lower_nibble.[2].value == '1')
+    ok!(lower_nibble.[3].value == '1')
+}
+
+test "BitVector[N] multiple slices on same storage" {
+    var bv = BitVector[8](0xFF)
+
+    var slice1 = bv.slice[0, 4]()  // BitVector[4]
+    var slice2 = bv.slice[4, 8]()  // BitVector[4]
+
+    slice1.[0] = '0'
+    slice1.[1] = '0'
+
+    ok!(bv.[0].value == '0')
+    ok!(bv.[1].value == '0')
+    ok!(bv.[2].value == '1')
+
+    slice2.[0] = '0'
+    slice2.[1] = '0'
+
+    ok!(bv.[4].value == '0')
+    ok!(bv.[5].value == '0')
+    ok!(bv.[6].value == '1')
+}
+
+test "BitVector[N] toU64 with as[T]" {
+    var bv = BitVector[8](0xAB)
+    ok!(bv as u64 == 0xAB)
+}
+
+test "BitVector[N] toI64 with as[T]" {
+    var bv = BitVector[8](0xFF)
+    ok!(bv as i64 == -1)
+}
+
+test "BitVector[N] slice conversions" {
+    var bv = BitVector[8](0xAB)
+    var slice = bv.slice[0, 4]()  // BitVector[4]
+
+    ok!(slice as u64 == 11)
+}
+
+// ============================================================================
+// Tests for BitVector[N] Operators
+// ============================================================================
+
+test "BitVector[N] bitwise AND operator" {
+    var a = BitVector[4](0b1010)  // 1010
+    var b = BitVector[4](0b1100)  // 1100
+    var result = a & b             // 1000
+
+    ok!(result.[0].value == '0')
+    ok!(result.[1].value == '0')
+    ok!(result.[2].value == '0')
+    ok!(result.[3].value == '1')
+    ok!((result as u64) == 8)
+}
+
+test "BitVector[N] bitwise OR operator" {
+    var a = BitVector[4](0b1010)  // 1010
+    var b = BitVector[4](0b1100)  // 1100
+    var result = a | b             // 1110
+
+    ok!(result.[0].value == '0')
+    ok!(result.[1].value == '1')
+    ok!(result.[2].value == '1')
+    ok!(result.[3].value == '1')
+    ok!((result as u64) == 14)
+}
+
+test "BitVector[N] bitwise XOR operator" {
+    var a = BitVector[4](0b1010)  // 1010
+    var b = BitVector[4](0b1100)  // 1100
+    var result = a ^ b             // 0110
+
+    ok!(result.[0].value == '0')
+    ok!(result.[1].value == '1')
+    ok!(result.[2].value == '1')
+    ok!(result.[3].value == '0')
+    ok!((result as u64) == 6)
+}
+
+test "BitVector[N] bitwise NOT operator" {
+    var a = BitVector[4](0b1010)  // 1010
+    var result = ~a                // 0101
+
+    ok!(result.[0].value == '1')
+    ok!(result.[1].value == '0')
+    ok!(result.[2].value == '1')
+    ok!(result.[3].value == '0')
+    ok!((result as u64) == 5)
+}
+
+test "BitVector[N] addition operator" {
+    var a = BitVector[8](10)
+    var b = BitVector[8](20)
+    var result = a + b
+
+    ok!((result as u64) == 30)
+}
+
+test "BitVector[N] subtraction operator" {
+    var a = BitVector[8](50)
+    var b = BitVector[8](20)
+    var result = a - b
+
+    ok!((result as u64) == 30)
+}
+
+test "BitVector[N] addition with overflow" {
+    var a = BitVector[4](15)  // Max for 4 bits
+    var b = BitVector[4](1)
+    var result = a + b         // Wraps to 0
+
+    ok!((result as u64) == 0)
+}
+
+test "BitVector[N] equality operator" {
+    var a = BitVector[8](0xAB)
+    var b = BitVector[8](0xAB)
+    var c = BitVector[8](0xCD)
+
+    ok!(a == b)
+    ok!(!(a == c))
+}
+
+test "BitVector[N] inequality operator" {
+    var a = BitVector[8](0xAB)
+    var b = BitVector[8](0xCD)
+    var c = BitVector[8](0xAB)
+
+    ok!(a != b)
+    ok!(!(a != c))
+}
+
+test "BitVector[N] equality with X and Z" {
+    var a = BitVector[4]()
+    var b = BitVector[4]()
+
+    a.[0] = 'X'
+    b.[0] = 'X'
+
+    // X == X should be true (same value)
+    ok!(a == b)
+
+    a.[1] = 'Z'
+    b.[1] = '0'
+
+    // Different values
+    ok!(a != b)
+}
+
+test "BitVector[N] string conversion" {
+    var bv = BitVector[4](0b1010)
+    var str = bv.toBinary()
+
+    ok!(str == "1010")
+}
+
+// ============================================================================
+// Tests for BitVector[N] String Parsing
+// ============================================================================
+
+test "BitVector[N] parse binary no prefix" {
+    var bv = BitVector[4]("1010")
+
+    ok!((bv as u64) == 10)
+    ok!(bv.[0].value == '0')  // LSB
+    ok!(bv.[1].value == '1')
+    ok!(bv.[2].value == '0')
+    ok!(bv.[3].value == '1')  // MSB
+}
+
+test "BitVector[N] parse binary with prefix" {
+    var bv = BitVector[8]("0b10101010")
+
+    ok!((bv as u64) == 0xAA)
+}
+
+test "BitVector[N] parse binary with underscores" {
+    var bv = BitVector[8]("1010_1010")
+
+    ok!((bv as u64) == 0xAA)
+}
+
+test "BitVector[N] parse binary with X and Z" {
+    var bv = BitVector[4]("10XZ")
+
+    ok!(bv.[0].value == 'Z')  // LSB
+    ok!(bv.[1].value == 'X')
+    ok!(bv.[2].value == '0')
+    ok!(bv.[3].value == '1')  // MSB
+}
+
+test "BitVector[N] parse hex with prefix" {
+    var bv = BitVector[8]("0xAB")
+
+    ok!((bv as u64) == 0xAB)
+}
+
+test "BitVector[N] parse hex lowercase" {
+    var bv = BitVector[8]("0xab")
+
+    ok!((bv as u64) == 0xAB)
+}
+
+test "BitVector[N] parse hex with underscores" {
+    var bv = BitVector[16]("0xAB_CD")
+
+    ok!((bv as u64) == 0xABCD)
+}
+
+test "BitVector[N] parse hex with X nibble" {
+    var bv = BitVector[8]("0xAX")
+
+    // Upper nibble should be 0xA = 1010
+    ok!(bv.[4].value == '0')
+    ok!(bv.[5].value == '1')
+    ok!(bv.[6].value == '0')
+    ok!(bv.[7].value == '1')
+
+    // Lower nibble should be all X
+    ok!(bv.[0].value == 'X')
+    ok!(bv.[1].value == 'X')
+    ok!(bv.[2].value == 'X')
+    ok!(bv.[3].value == 'X')
+}
+
+test "BitVector[N] parse hex with Z nibble" {
+    var bv = BitVector[8]("0xAZ")
+
+    // Upper nibble should be 0xA = 1010
+    ok!(bv.[4].value == '0')
+    ok!(bv.[5].value == '1')
+    ok!(bv.[6].value == '0')
+    ok!(bv.[7].value == '1')
+
+    // Lower nibble should be all Z
+    ok!(bv.[0].value == 'Z')
+    ok!(bv.[1].value == 'Z')
+    ok!(bv.[2].value == 'Z')
+    ok!(bv.[3].value == 'Z')
+}
+
+test "BitVector[N] parse auto-detects binary" {
+    var bv = BitVector[4]("0b1010")
+    ok!((bv as u64) == 10)
+}
+
+test "BitVector[N] parse auto-detects hex" {
+    var bv = BitVector[8]("0xAB")
+    ok!((bv as u64) == 0xAB)
+}
+
+test "BitVector[N] parse defaults to binary" {
+    var bv = BitVector[4]("1010")
+    ok!((bv as u64) == 10)
+}

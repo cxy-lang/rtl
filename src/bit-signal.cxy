@@ -1,0 +1,510 @@
+module bit_signal
+
+import { Bit } from "./bit.cxy"
+import { BitVector, BitVectorBase } from "./bitvector.cxy"
+import { Event } from "./event.cxy"
+import { SignalBase } from "./signal-base.cxy"
+import { simContext, SimContext } from "./sim-context.cxy"
+import { Vector } from "stdlib/vector.cxy"
+
+// ============================================================================
+// BitSignalBase - Base class for BitSignal with downstream cascading
+// ============================================================================
+
+pub class BitSignalBase : SignalBase {
+    func `init`(name: string = null) {
+        super(name)
+    }
+
+    // Cascade notification downstream to descendants
+    virtual func downstream(_: &const BitVectorBase) {}
+    virtual func upstream(_: i32, _: &const BitVectorBase) {}
+}
+
+// ============================================================================
+// BitSlice - Metadata for tracking child slices
+// ============================================================================
+
+struct BitSlice {
+    low: u16                // Absolute bit index (low bound)
+    high: u16               // Absolute bit index (high bound)
+    signal: BitSignalBase   // Reference to the slice signal
+}
+
+// ============================================================================
+// BitSignal[N] - Signal type with slice propagation
+// ============================================================================
+
+pub class BitSignal[N] : BitSignalBase {
+    `IsBitSignal = true  // Plugin marker for type detection
+
+    // Shared storage - BitVector[N] already has _bits and _offset for parent tracking
+    _storage: BitVector[N]     // Shared BitVector (class = ref counted)
+    _ownsStorage: bool         // True only for root signal
+
+    // Delta-cycle state
+    _next: Optional[BitVector[N]] = null
+    _dirty: bool = false
+
+    // Slice tracking (every signal tracks its own children, not just root)
+    _childSlices: Vector[BitSlice] = Vector[BitSlice]()
+
+    // Parent notification (only used by slices)
+    _parent: BitSignalBase = null
+    _myIndexInParent: i32 = -1
+
+    // Root constructor - from BitVector
+    func `init`(initial: BitVector[N], name: string = null) {
+        super(name)
+        _storage = &&initial  // Share BitVector reference (class = ref)
+        _parent = null
+    }
+
+    // Root constructor - from integer
+    func `init`(initial: u64, name: string = null) {
+        super(name)
+        _storage = BitVector[N](initial)
+    }
+
+    // Private slice constructor - shares parent's storage
+    @private
+    func `init`(
+        storage: BitVector[N],
+        parent: BitSignalBase,
+        myIdx: i32,
+        name: string = null,
+    ) {
+        super(name)
+        _storage = storage
+        _parent = &&parent
+        _myIndexInParent = myIdx
+    }
+
+    // Read current value from shared storage
+    const func read(): BitVector[N] {
+        // Return the storage itself (it's already the right type and offset)
+        return _storage
+    }
+
+    // Cascade notification to all descendants when we write
+    @override
+    func downstream(newValue: &const BitVectorBase) {
+        var myLow = _storage._offset as u16
+        var myHigh = (_storage._offset + #{N.value}) as u16
+
+        for i in 0.._childSlices.size() {
+            var child = _childSlices.[i as i32]
+
+            // Check if our write affects this child
+            if rangesOverlap(myLow, myHigh, child.low, child.high) {
+                // Check if bits actually changed for this child
+                if bitsChangedForChild(newValue, &child) {
+                    child.signal.markDirty()
+                    simContext().deltaMgr().registerDirtySignal(child.signal)
+                    // Cascade recursively to grandchildren
+                    child.signal.downstream(newValue)
+                }
+            }
+        }
+    }
+
+    // Check if new value changes any bits in a child's range
+    func bitsChangedForChild(newValue: &const BitVectorBase, child: &BitSlice): bool {
+        // Find overlapping range
+        var myLow = _storage._offset as u16
+        var myHigh = (_storage._offset + #{N.value}) as u16
+        var overlapLow = max(myLow, child.low)
+        var overlapHigh = min(myHigh, child.high)
+
+        // Compare bits in overlapping range
+        for bitPos in overlapLow..overlapHigh {
+            var oldBit = _storage.getBit((bitPos - _storage._offset) as u64)
+            var newBitOffset = (bitPos - myLow) as u64
+            var newBit = newValue.getBit(newBitOffset)
+
+            if !(oldBit == newBit) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    // Write operator - schedule for next delta cycle
+    func `<<`(value: BitVector[N]) {
+        _next = Some(value)
+        _dirty = true
+        simContext().deltaMgr().registerDirtySignal(__copy!(this))
+
+        // Notify parent UP (parent checks overlapping siblings)
+        if _parent != null {
+            _parent.upstream(_myIndexInParent, &value)
+        }
+
+        // Cascade DOWN to all descendants
+        downstream(&value)
+    }
+
+    // Alias for write
+    func write(value: BitVector[N]) {
+        this << value
+    }
+
+    // Create slice - shares storage and registers with parent
+    func slice[L, H]() {
+        // Get index where this slice will be stored
+        var sliceIdx = _childSlices.size() as i32
+        // Create a slice view of our storage
+        var sliceStorage = _storage.slice[L, H]()
+        // Create slice signal sharing our storage
+        #const NewN = H.value - L.value
+        var sliceSig = BitSignal[#{NewN}](
+            sliceStorage,
+            __copy!(this),
+            sliceIdx
+        )
+
+        // Register with parent (this signal, whether root or slice)
+        // Every signal tracks its own direct children
+        var absLow = (_storage._offset + #{L.value}) as u16
+        var absHigh = (_storage._offset + #{H.value}) as u16
+        _childSlices.push(BitSlice{low: absLow, high: absHigh, signal: sliceSig})
+
+        return &&sliceSig
+    }
+
+    // Called when a child slice changes - check overlapping siblings
+    func upstream(sliceIdx: i32, newValue: &const BitVectorBase) {
+        var changedSlice = _childSlices.[sliceIdx]
+
+        // Check overlapping siblings and schedule if bits changed
+        for i in 0.._childSlices.size() {
+            if i == sliceIdx { continue }
+
+            var sibling = _childSlices.[i as i32]
+            if rangesOverlap(changedSlice.low, changedSlice.high, sibling.low, sibling.high) {
+                // Check if overlapping bits actually changed
+                if bitsChangedInRange(newValue, changedSlice, sibling) {
+                    sibling.signal.markDirty()
+                    simContext().deltaMgr().registerDirtySignal(sibling.signal)
+                    sibling.signal.downstream(newValue)
+                }
+            }
+        }
+    }
+
+    // Cascade notification to all descendants when we write
+
+    // Check if new value changes any bits in sibling's range
+    func bitsChangedInRange(
+        newValue: &const BitVectorBase,
+        changedSlice: &BitSlice,
+        sibling: &BitSlice
+    ): bool {
+        // Find overlapping range
+        var overlapLow = max(changedSlice.low, sibling.low)
+        var overlapHigh = min(changedSlice.high, sibling.high)
+
+        // Compare bits in overlapping range
+        for bitPos in overlapLow..overlapHigh {
+            var oldBit = _storage.getBit((bitPos - _storage._offset) as u64)
+            var newBitOffset = (bitPos - changedSlice.low) as u64
+            var newBit = newValue.getBit(newBitOffset)
+
+            if !(oldBit == newBit) {
+                return true  // At least one bit changed
+            }
+        }
+
+        return false  // No bits changed in overlap
+    }
+
+    // Update - called by simulation kernel at end of delta cycle
+    @override
+    func _update(): bool {
+        if !_dirty {
+            return false
+        }
+
+        // Commit write to storage if we have one scheduled
+        if !!_next {
+            var nextVal = *_next
+
+            // Write to shared storage using BitVector methods
+            for i in 0..#{N.value} {
+                _storage.setBit(i, nextVal.getBit(i))
+            }
+
+            _next = null
+        }
+
+        _dirty = false
+        valueChanged.notify()
+        return true
+    }
+
+    // Helper: check if two ranges overlap
+    func rangesOverlap(aLow: u16, aHigh: u16, bLow: u16, bHigh: u16): bool {
+        return !(aHigh <= bLow || bHigh <= aLow)
+    }
+
+    @override
+    func isDirty(): bool => _dirty
+
+    @override
+    func markDirty() {
+        _dirty = true
+    }
+
+    @override
+    func vcdValue(): u64 {
+        return _storage as u64
+    }
+
+    @inline const func `str`(os: &OutputStream) {
+        os << _storage
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test {
+    struct TestData {
+        count: u64 = 0
+        func reset() {
+            count = 0
+        }
+    }
+    var data = TestData{}
+
+    func waitForEvent(event: &Event) {
+        event.wait()
+        data.count++
+    }
+}
+
+test "BitSignal: basic construction and read" {
+    var ctx = simContext()
+    ctx.reset()
+
+    var sig = BitSignal[8](0x42)
+    var value = sig.read()
+
+    ok!(value as u64 == 0x42)
+}
+
+test "BitSignal: write and update" {
+    var ctx = simContext()
+    ctx.reset()
+
+    var sig = BitSignal[8](0x00)
+    sig << BitVector[8](0xAB)
+
+    // Before update, should still read old value
+    ok!(sig.read() as u64 == 0x00)
+
+    // Run delta cycle
+    ctx.deltaMgr().runUntilStable()
+
+    // After update, should read new value
+    ok!(sig.read() as u64 == 0xAB)
+}
+
+test "BitSignal: valueChanged event fires" {
+    var ctx = simContext()
+    ctx.reset()
+    data.reset()
+
+    var sig = BitSignal[8](0x00)
+
+    // Spawn coroutine waiting on event
+    async waitForEvent(sig.valueChanged)
+
+    sig << BitVector[8](0xFF)
+    ctx.deltaMgr().runUntilStable()
+
+    // Event should have fired, coroutine should have run
+    ok!(data.count == 1)
+}
+
+test "BitSignal: slice creation" {
+    var ctx = simContext()
+    ctx.reset()
+
+    var sig = BitSignal[16](0xABCD)
+    var lowByte = sig.slice[0, 8]()
+    var highByte = sig.slice[8, 16]()
+
+    ok!(lowByte.read() as u64 == 0xCD)
+    ok!(highByte.read() as u64 == 0xAB)
+}
+
+test "BitSignal: parent write notifies child" {
+    var ctx = simContext()
+    ctx.reset()
+    data.reset()
+
+    var sig = BitSignal[16](0x0000)
+    var lowByte = sig.slice[0, 8]()
+
+    // Spawn coroutine waiting on child event
+    async waitForEvent(lowByte.valueChanged)
+
+    // Write to parent
+    sig << BitVector[16](0x12FF)
+    ctx.deltaMgr().runUntilStable()
+
+    ok!(data.count == 1)
+    ok!(lowByte.read() as u64 == 0xFF)
+}
+
+test "BitSignal: child write updates parent" {
+    var ctx = simContext()
+    ctx.reset()
+
+    var sig = BitSignal[16](0xABCD)
+    var lowByte = sig.slice[0, 8]()
+
+    // Write to child
+    lowByte << BitVector[8](0x12)
+    ctx.deltaMgr().runUntilStable()
+
+    // Parent storage should be updated
+    ok!(sig.read() as u64 == 0xAB12)
+}
+
+test "BitSignal: sibling notification on overlap" {
+    var ctx = simContext()
+    ctx.reset()
+    data.reset()
+
+    var sig = BitSignal[16](0x0000)
+    var byte0 = sig.slice[0, 8]()
+    var byte1 = sig.slice[8, 16]()
+    var nibble0 = sig.slice[0, 4]()  // Overlaps with byte0
+
+    // Spawn coroutines waiting on events
+    async waitForEvent(byte0.valueChanged)
+    async waitForEvent(byte1.valueChanged)
+    async waitForEvent(nibble0.valueChanged)
+
+    // Write to byte0 - should notify nibble0 (overlaps) but not byte1 (no overlap)
+    byte0 << BitVector[8](0xFF)
+    ctx.deltaMgr().runUntilStable()
+
+    // Only nibble0 should fire (byte0 doesn't notify itself, byte1 no overlap)
+    ok!(data.count == 2)
+}
+
+test "BitSignal: no notification when bits don't change" {
+    var ctx = simContext()
+    ctx.reset()
+    data.reset()
+
+    var sig = BitSignal[16](0xAB00)
+    var lowByte = sig.slice[0, 8]()
+    var highByte = sig.slice[8, 16]()
+
+    // Spawn coroutine waiting on low byte event
+    async waitForEvent(lowByte.valueChanged)
+
+    // Write to high byte only - low byte bits unchanged
+    highByte << BitVector[8](0xCD)
+    ctx.deltaMgr().runUntilStable()
+
+    ok!(data.count == 0)
+    ok!(sig.read() as u64 == 0xCD00)
+}
+
+test "BitSignal: nested slices (grandchild)" {
+    var ctx = simContext()
+    ctx.reset()
+    data.reset()
+
+    var sig = BitSignal[16](0x0000)
+    var lowByte = sig.slice[0, 8]()
+    var nibble = lowByte.slice[0, 4]()  // Grandchild slice
+
+    // Spawn coroutine waiting on grandchild event
+    async waitForEvent(nibble.valueChanged)
+
+    // Write to root - should cascade to grandchild
+    sig << BitVector[16](0x00FF)
+    ctx.deltaMgr().runUntilStable()
+
+    ok!(data.count == 1)
+    ok!(nibble.read() as u64 == 0x0F)
+}
+
+test "BitSignal: grandchild write cascades up" {
+    var ctx = simContext()
+    ctx.reset()
+
+    var sig = BitSignal[16](0x0000)
+    var lowByte = sig.slice[0, 8]()
+    var nibble = lowByte.slice[0, 4]()
+
+    // Write to grandchild
+    nibble << BitVector[4](0xA)
+    ctx.deltaMgr().runUntilStable()
+
+    // Should cascade up through parent to root
+    ok!(lowByte.read() as u64 == 0x0A)
+    ok!(sig.read() as u64 == 0x000A)
+}
+
+test "BitSignal: sibling children notification" {
+    var ctx = simContext()
+    ctx.reset()
+    data.reset()
+
+    // Create 16-bit signal with two 8-bit children
+    var sig = BitSignal[16](0x0000)
+    var byte0 = sig.slice[0, 8]()   // bits 0-7
+    var byte1 = sig.slice[8, 16]()  // bits 8-15
+
+    // Each byte has nibble children
+    @unused var nibble0 = byte0.slice[0, 4]()  // bits 0-3 (via byte0)
+    var nibble1 = byte0.slice[4, 8]()  // bits 4-7 (via byte0)
+    @unused var nibble2 = byte1.slice[0, 4]()  // bits 8-11 (via byte1)
+
+    // Watch nibble1 (bits 4-7)
+    async waitForEvent(nibble1.valueChanged)
+
+    // Write to byte0 - should notify nibble1 (its child)
+    byte0 << BitVector[8](0xFF)
+    ctx.deltaMgr().runUntilStable()
+
+    ok!(data.count == 1)
+    ok!(nibble1.read() as u64 == 0x0F)
+}
+
+test "BitSignal: overlapping sibling children" {
+    var ctx = simContext()
+    ctx.reset()
+    data.reset()
+
+    // Create signal with overlapping slices
+    var sig = BitSignal[16](0x0000)
+    var slice0_8 = sig.slice[0, 8]()    // bits 0-7
+    var slice4_12 = sig.slice[4, 12]()  // bits 4-11 (overlaps both)
+    var slice8_16 = sig.slice[8, 16]()  // bits 8-15
+
+    // Each slice has children
+    @unused var child0 = slice0_8.slice[0, 4]()    // bits 0-3
+    var child1 = slice4_12.slice[0, 4]()   // bits 4-7 (overlaps with slice0_8)
+    var child2 = slice8_16.slice[0, 4]()   // bits 8-11 (overlaps with slice4_12)
+
+    // Watch child1 and child2
+    async waitForEvent(child1.valueChanged)
+    async waitForEvent(child2.valueChanged)
+
+    // Write to slice4_12 - should notify both children
+    slice4_12 << BitVector[8](0xFF)
+    ctx.deltaMgr().runUntilStable()
+
+    // Both children should be notified (they're our direct children)
+    ok!(data.count == 2)
+}

@@ -1,0 +1,30 @@
+// Test file for BitVector plugin transformation
+//
+// This tests that the plugin correctly transforms:
+//   @input a: BitVector[32] → a: InPort[BitSignal[32]]
+
+import {InBitPort, OutBitPort, BitSignal, BitVector} from "../index.cxy"
+import plugin "rtl" as rtl
+
+@rtl::component
+struct ALU {
+    @input a: BitVector[32]
+    @input b: BitVector[32]
+    @input op: BitVector[4]
+    @output result: BitVector[32]
+}
+
+func main() {
+    // Create signals
+    var a = BitSignal[32](0x12345678.u64)
+    var b = BitSignal[32](0x87654321.u64)
+    var op = BitSignal[4](0x1.u64)
+    var result = BitSignal[32](0)
+
+    // Instantiate component - if plugin works, constructor should expect &BitSignal[N]
+    var alu = ALU(a, b, op, result)
+
+    println("ALU created with BitVector ports")
+
+    return 0
+}

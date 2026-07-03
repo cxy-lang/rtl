@@ -1,0 +1,310 @@
+module bit
+
+/**
+ * Bit - Four-state logic value type
+ *
+ * Represents a single bit value with four possible states:
+ * - '0' (logic low)
+ * - '1' (logic high)
+ * - 'X' (unknown/undefined)
+ * - 'Z' (high-impedance)
+ *
+ * This is a VALUE type, not a signal. Use Signal[Bit] to create
+ * a signal that carries Bit values.
+ *
+ * Supports both character literals ('0', '1', 'X', 'Z') and integer
+ * literals (0, 1) for convenience. Provides operator overloading for
+ * bitwise operations.
+ */
+
+pub struct Bit {
+    `isBit = true
+
+    value: wchar = '0'  // Internal state: '0', '1', 'X', or 'Z'
+
+    func `init`(value: wchar) {
+        assert!(value == '0' || value == '1' || value == 'X' || value == 'Z')
+        this.value = value
+    }
+
+    func `init`(value: u32) {
+        assert!(value == 0 || value == 1)
+        this.value = value == 0 ? '0' : '1'
+    }
+
+    // Bitwise AND operator
+    const func `&`(other: &Bit): Bit {
+        var a = value
+        var b = other.value
+
+        // AND truth table for 4-state logic
+        if a == '0' || b == '0' {
+            return Bit('0')
+        }
+        if a == '1' && b == '1' {
+            return Bit('1')
+        }
+        return Bit('X')
+    }
+
+    // Bitwise OR operator
+    const func `|`(b: wchar): Bit {
+        var a = value
+
+        // OR truth table for 4-state logic
+        if a == '1' || b == '1' {
+            return Bit('1')
+        }
+        if a == '0' && b == '0' {
+            return Bit('0')
+        }
+        return Bit('X')
+    }
+
+    const func `|`(b: Bit): Bit {
+        return this | b.value
+    }
+
+    const func `|`(b: i32): Bit {
+        return this | Bit(b)
+    }
+
+    // Bitwise XOR operator
+    const func `^`(a: wchar): Bit {
+        var b = value
+        // XOR truth table
+        if ((a == '0' || a == '1') && (b == '0' || b == '1')) {
+            if ((a == '0' && b == '0') || (a == '1' && b == '1')) {
+                return Bit('0')
+            }
+            return Bit('1')
+        }
+        return Bit('X')
+    }
+
+    const func `^`(other: &const Bit): Bit {
+        return this ^ other.value
+    }
+
+    const func `^`(other: u32): Bit {
+        return this ^ Bit(other)
+    }
+
+    // Bitwise NOT operator
+    const func `~`(): Bit {
+        if value == '0' {
+            return Bit('1')
+        }
+        if value == '1' {
+            return Bit('0')
+        }
+        return Bit('X')
+    }
+
+    // Comparison with character
+    const func `==`(other: wchar): bool {
+        return value == other
+    }
+
+    // Comparison with integer (0 or 1)
+    const func `==`(other: i32): bool {
+        if other == 0 {
+            return value == '0'
+        }
+        return value == '1'
+    }
+
+    // Comparison with another Bit
+    const func `==`(other: &Bit): bool {
+        return value == other.value
+    }
+
+    const func `str`(os: &OutputStream) {
+        os << value
+    }
+
+    const func `as`[T]() {
+        require!(T.isInteger, "{t} must be an integer type", #T)
+        if value == '1' {
+            return 1
+        }
+        return 0
+    }
+}
+
+// Helper constructors (standalone functions)
+pub func Bit0(): Bit {
+    return Bit('0')
+}
+
+pub func Bit1(): Bit {
+    return Bit('1')
+}
+
+pub func BitX(): Bit {
+    return Bit('X')
+}
+
+pub func BitZ(): Bit {
+    return Bit('Z')
+}
+
+// Tests
+test "Bit construction with character values" {
+    var b0 = Bit('0')
+    var b1 = Bit('1')
+    var bx = Bit('X')
+    var bz = Bit('Z')
+
+    ok!(b0.value == '0')
+    ok!(b1.value == '1')
+    ok!(bx.value == 'X')
+    ok!(bz.value == 'Z')
+}
+
+test "Bit helper constructors" {
+    var b0 = Bit0()
+    var b1 = Bit1()
+    var bx = BitX()
+    var bz = BitZ()
+
+    ok!(b0.value == '0')
+    ok!(b1.value == '1')
+    ok!(bx.value == 'X')
+    ok!(bz.value == 'Z')
+}
+
+test "Bit AND operation" {
+    var a = Bit1()
+    var b = Bit1()
+    var c = a & b
+    ok!(c.value == '1')
+
+    var d = Bit0()
+    var e = a & d
+    ok!(e.value == '0')
+
+    var f = BitX()
+    var g = a & f
+    ok!(g.value == 'X')
+}
+
+test "Bit OR operation" {
+    var a = Bit0()
+    var b = Bit0()
+    var c = a | b
+    ok!(c.value == '0')
+
+    var d = Bit1()
+    var e = a | d
+    ok!(e.value == '1')
+
+    var f = BitX()
+    var g = a | f
+    ok!(g.value == 'X')
+}
+
+test "Bit XOR operation" {
+    var a = Bit0()
+    var b = Bit0()
+    var c = a ^ b
+    ok!(c.value == '0')
+
+    var d = Bit1()
+    var e = a ^ d
+    ok!(e.value == '1')
+
+    var f = Bit1()
+    var g = d ^ f
+    ok!(g.value == '0')
+}
+
+test "Bit NOT operation" {
+    var a = Bit0()
+    var b = ~a
+    ok!(b.value == '1')
+
+    var c = Bit1()
+    var d = ~c
+    ok!(d.value == '0')
+
+    var e = BitX()
+    var f = ~e
+    ok!(f.value == 'X')
+}
+
+test "Bit comparison with character" {
+    var bit = Bit1()
+    ok!(bit == '1')
+    ok!(!(bit == '0'))
+    ok!(!(bit == 'X'))
+}
+
+test "Bit comparison with integer" {
+    var bit = Bit(1)
+    ok!(bit == 1)
+    ok!(!(bit == 0))
+}
+
+test "Bit comparison with another Bit" {
+    var a = Bit1()
+    var b = Bit1()
+    var c = Bit0()
+
+    ok!(a == b)
+    ok!(!(a == c))
+}
+
+test "Bit complex expression" {
+    var a = Bit1()
+    var b = Bit0()
+    var c = Bit1()
+
+    var result = a & b | c
+    ok!(result.value == '1')  // (1 & 0) | 1 = 0 | 1 = 1
+}
+
+test "Bit four-state AND truth table" {
+    var b0 = Bit0()
+    var b1 = Bit1()
+    var bx = BitX()
+
+    // 0 & anything = 0
+    ok!((b0 & b0).value == '0')
+    ok!((b0 & b1).value == '0')
+    ok!((b0 & bx).value == '0')
+
+    // 1 & 1 = 1
+    ok!((b1 & b1).value == '1')
+
+    // 1 & X = X
+    ok!((b1 & bx).value == 'X')
+}
+
+test "Bit four-state OR truth table" {
+    var b0 = Bit0()
+    var b1 = Bit1()
+    var bx = BitX()
+
+    // 1 | anything (except 0) = 1
+    ok!((b1 | b0).value == '1')
+    ok!((b1 | b1).value == '1')
+    ok!((b1 | bx).value == '1')
+
+    // 0 | 0 = 0
+    ok!((b0 | b0).value == '0')
+
+    // 0 | X = X
+    ok!((b0 | bx).value == 'X')
+}
+
+test "Bit with Signal integration" {
+    // This demonstrates how Bit is used as a value in signals
+    // Note: Signal[Bit] not Signal containing Bit
+    var bit_val = Bit1()
+    ok!(bit_val.value == '1')
+
+    var other = Bit0()
+    var result = bit_val & other
+    ok!(result.value == '0')
+}

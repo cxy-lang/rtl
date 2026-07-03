@@ -1,0 +1,249 @@
+module time
+
+/**
+ * Time - RTL simulation time representation
+ *
+ * Provides a type-safe time value with support for different units
+ * and natural syntax via literal suffixes (10.ns, 5.us, etc.)
+ */
+
+// Time units supported by the simulation
+pub enum TimeUnit: u64 {
+    Picosecond = 1`u64,
+    Nanosecond = 1000`u64,
+    Microsecond = 1000000`u64,
+    Millisecond = 1000000000`u64,
+    Second = 1000000000000`u64
+}
+
+// Core Time type - immutable value type representing simulation time
+pub struct Time {
+    _value: i64 = 0     // Internal value in picoseconds (smallest unit)
+
+    // Convert to picoseconds (useful for comparisons)
+    const func toPicoseconds(): i64 {
+        return _value
+    }
+
+    // Convert to nanoseconds
+    const func toNanoseconds(): f64 {
+        return (_value as f64) / 1000.0
+    }
+
+    // Convert to microseconds
+    const func toMicroseconds(): f64 {
+        return (_value as f64) / 1000000.0
+    }
+
+    // Convert to milliseconds
+    const func toMilliseconds(): f64 {
+        return (_value as f64) / 1000000000.0
+    }
+
+    // Convert to seconds
+    const func toSeconds(): f64 {
+        return (_value as f64) / 1000000000000.0
+    }
+
+    // Arithmetic operators
+    const func `+`(other: &Time): Time {
+        return Time{_value: _value + other._value}
+    }
+
+    const func `-`(other: &Time): Time {
+        return Time{_value: _value - other._value}
+    }
+
+    const func `*`(factor: i64): Time {
+        return Time{_value: _value * factor}
+    }
+
+    const func `/`(divisor: i64): Time {
+        return Time{_value: _value / divisor}
+    }
+
+    // Comparison operators
+    const func `==`(other: &Time): bool {
+        return _value == other._value
+    }
+
+    const func `!=`(other: &Time): bool {
+        return _value != other._value
+    }
+
+    const func `<`(other: &Time): bool {
+        return _value < other._value
+    }
+
+    const func `>`(other: &Time): bool {
+        return _value > other._value
+    }
+
+    const func `<=`(other: &Time): bool {
+        return _value <= other._value
+    }
+
+    const func `>=`(other: &Time): bool {
+        return _value >= other._value
+    }
+
+    const func raw(unit: TimeUnit): f64 {
+        if unit == TimeUnit.Picosecond {
+            return _value
+        } else if unit == TimeUnit.Nanosecond {
+            return (_value as f64) / (TimeUnit.Nanosecond as f64)
+        } else if unit == TimeUnit.Microsecond {
+            return (_value as f64) / (TimeUnit.Microsecond as f64)
+        } else if unit == TimeUnit.Millisecond {
+            return (_value as f64) / (TimeUnit.Millisecond as f64)
+        } else {
+            return (_value as f64) / (TimeUnit.Second as f64)
+        }
+    }
+
+    const func unit(): TimeUnit {
+        if _value < TimeUnit.Nanosecond {
+            return TimeUnit.Picosecond
+        } else if _value < TimeUnit.Microsecond {
+            return TimeUnit.Nanosecond
+        } else if _value < TimeUnit.Millisecond {
+            return TimeUnit.Microsecond
+        } else if _value < TimeUnit.Second {
+            return TimeUnit.Millisecond
+        } else {
+            return TimeUnit.Second
+        }
+    }
+
+    const func `str`(os: &OutputStream) {
+        // Format time in appropriate unit based on magnitude
+        // < 1 ns → ps, < 1 us → ns, < 1 ms → us, < 1 sec → ms, else → sec
+
+        if _value < TimeUnit.Nanosecond {
+            // Print in picoseconds
+            os << _value << "ps"
+        } else if _value < TimeUnit.Microsecond {
+            // Print in nanoseconds
+            var nsValue = (_value as f64) / (TimeUnit.Nanosecond as f64)
+            os << nsValue << "ns"
+        } else if _value < TimeUnit.Millisecond {
+            // Print in microseconds
+            var usValue = (_value as f64) / (TimeUnit.Microsecond as f64)
+            os << usValue << "us"
+        } else if _value < TimeUnit.Second {
+            // Print in milliseconds
+            var msValue = (_value as f64) / (TimeUnit.Millisecond as f64)
+            os << msValue << "ms"
+        } else {
+            // Print in seconds
+            var secValue = (_value as f64) / (TimeUnit.Second as f64)
+            os << secValue << "sec"
+        }
+    }
+}
+
+// Literal suffix functions - enable natural syntax like 10.ns, 5.us
+// Compiler transforms 10.ns → ns(10)
+
+pub func ps(value: i64): Time {
+    return Time{_value: value * TimeUnit.Picosecond}
+}
+
+pub func ns(value: i64): Time {
+    return Time{_value: value * TimeUnit.Nanosecond}
+}
+
+pub func us(value: i64): Time {
+    return Time{_value: value * TimeUnit.Microsecond}
+}
+
+pub func ms(value: i64): Time {
+    return Time{_value: value * TimeUnit.Millisecond}
+}
+
+pub func sec(value: i64): Time {
+    return Time{_value: value * TimeUnit.Second}
+}
+
+// Tests
+test "Time construction from different units" {
+    var t1 = Time{_value: 10.i64 * TimeUnit.Nanosecond}
+    var t2 = Time{_value: 10000.i64 * TimeUnit.Picosecond}
+    ok!(t1 == t2)
+
+    var t3 = Time{_value: 1.i64 * TimeUnit.Microsecond}
+    var t4 = Time{_value: 1000.i64 * TimeUnit.Nanosecond}
+    ok!(t3 == t4)
+}
+
+test "Time literal suffix syntax" {
+    var t1 = 10.ns
+    var t2 = ns(10)
+    ok!(t1 == t2)
+
+    var t3 = 5.us
+    ok!(t3.toNanoseconds() == 5000.0)
+
+    var t4 = 100.ps
+    ok!(t4.toPicoseconds() == 100)
+}
+
+test "Time arithmetic operations" {
+    var t1 = 10.ns
+    var t2 = 5.ns
+
+    var sum = t1 + t2
+    ok!(sum == 15.ns)
+
+    var diff = t1 - t2
+    ok!(diff == 5.ns)
+
+    var product = t1 * 2
+    ok!(product == 20.ns)
+
+    var quotient = t1 / 2
+    ok!(quotient == 5.ns)
+}
+
+test "Time comparison operations" {
+    var t1 = 10.ns
+    var t2 = 5.ns
+    var t3 = 10.ns
+
+    ok!(t1 > t2)
+    ok!(t2 < t1)
+    ok!(t1 >= t3)
+    ok!(t1 <= t3)
+    ok!(t1 == t3)
+    ok!(t1 != t2)
+}
+
+test "Time unit conversions" {
+    var t = 1.us
+
+    ok!(t.toPicoseconds() == 1000000)
+    ok!(t.toNanoseconds() == 1000.0)
+    ok!(t.toMicroseconds() == 1.0)
+    ok!(t.toMilliseconds() == 0.001)
+}
+
+test "Time arithmetic with mixed units" {
+    var t1 = 1.us
+    var t2 = 500.ns
+    var sum = t1 + t2
+
+    ok!(sum.toNanoseconds() == 1500.0)
+
+    var t3 = 2.ms
+    var t4 = 1.ms
+    var diff = t3 - t4
+    ok!(diff == 1.ms)
+}
+
+test "Time zero" {
+    var t1 = 0.ns
+    var t2 = Time{_value: 0}
+
+    ok!(t1 == t2)
+    ok!(t1.toPicoseconds() == 0)
+}

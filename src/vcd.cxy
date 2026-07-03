@@ -1,0 +1,141 @@
+module vcd
+
+import { TimeUnit } from "./time.cxy"
+import { Clock } from "./clock.cxy"
+import { SignalBase } from "./signal-base.cxy"
+import { simContext } from "./sim-context.cxy"
+import { EventGroup } from "./event-group.cxy"
+
+import { Vector } from "stdlib/vector.cxy"
+import { FileOutputStream } from "stdlib/os.cxy"
+
+import test { Signal } from "./signal.cxy"
+import test { Bit } from "./bit.cxy"
+import test { ns } from "./time.cxy"
+
+import plugin "rtl" as rtl
+
+/**
+ * TracedSignal - Tracks a signal for VCD tracing
+ */
+struct TracedSignal {
+    name: string
+    sig: SignalBase
+    lastValue: u64
+}
+
+/**
+ * VcdComponent - Component that traces signals on clock edges
+ *
+ * Monitors all registered signals and outputs value changes to a file.
+ * Only records changes (not every clock edge) for efficiency.
+ */
+@rtl::component
+class VcdComponent {
+    @input clk: Clock
+
+    signals: Vector[TracedSignal]
+    eventGroup = EventGroup()
+    os: &OutputStream
+    unit: TimeUnit
+
+    func `init`(clk: &Clock, outputStream: &OutputStream) {
+        op__init(&clk)
+        signals = Vector[TracedSignal]()
+        os = outputStream
+        os << "header=>period: " << clk.period() << ":"
+           << (clk.isHigh()? 1: 0) << "\n"
+        unit = clk.period().unit()
+    }
+
+    func _trace_process() {
+        while {
+            eventGroup.waitAny()
+            var anyChanged = false
+            var rawTime = simContext().currentTime().raw(unit)
+            // Check each signal for changes
+            for sig in signals {
+                var currentValue = sig.0.sig.vcdValue()
+
+                if currentValue != sig.0.lastValue {
+                    if !anyChanged {
+                        os << rawTime << "=>"
+                    }
+                    else {
+                        os << ","
+                    }
+                    os << sig.0.name << ":"
+                    sig.0.sig.dump(os)
+                    sig.0.lastValue = currentValue
+                    anyChanged = true
+                }
+            }
+            if anyChanged {
+                os << "\n"
+            }
+        }
+    }
+
+    func start() {
+        __async!(_trace_process(), "trace_process")
+    }
+}
+
+/**
+ * Vcd - VCD trace file manager
+ *
+ * Creates a trace file and component to record signal changes.
+ *
+ * Example:
+ *   var trace = Vcd("counter.trace", clk)
+ *   trace.addSignal("clk", clk)
+ *   trace.addSignal("count", count)
+ */
+pub class Vcd {
+    fos: FileOutputStream
+    vcdComp: VcdComponent
+
+    func `init`(path: string, clk: Clock) {
+        fos = FileOutputStream.open(path, false, O_WRONLY!|O_CREAT!|O_TRUNC!) catch {
+            panic!(ex!.what())
+            yield null
+        }
+        vcdComp = VcdComponent(&clk, &fos)
+    }
+
+    /**
+     * Add a signal to trace
+     *
+     * @param name - Name to use in trace output
+     * @param sig - Signal to trace (must be SignalBase)
+     */
+    func addSignal(name: string, sig: SignalBase) {
+        vcdComp.eventGroup.addEvent(sig.valueChanged)
+        vcdComp.signals.push(TracedSignal{
+            name: &&name,
+            sig: sig,
+            lastValue: ~0.u64  // Max value to force initial dump
+        })
+    }
+
+    func start() {
+        vcdComp.start()
+    }
+}
+
+test "VCD basic tracing" {
+    var ctx = simContext()
+    var clk = Clock("clk", 10.ns)
+    var sig = Signal[u32](0)
+
+    var trace = Vcd("/tmp/test.trace", clk)
+    trace.addSignal("sig", sig)
+
+    clk.start()
+
+    sig << 1
+    ctx.run(5.ns)
+
+    sig << 2
+    ctx.run(10.ns)
+}

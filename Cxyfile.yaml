@@ -9,3 +9,37 @@ dependencies: []
 
 tests:
   - file: "src/**/*.cxy"
+
+builds:
+  counter-example:
+    entry: examples/counter.cxy
+    output: counter-
+
+  counter-xform:
+    entry: examples/counter-xform.cxy
+    output: counter-xform
+
+  multi-event:
+    entry: examples/multi-event.cxy
+    output: multi-event
+
+  counter-trace:
+    entry: examples/counter-trace.cxy
+    output: counter-trace
+
+  bitvector-example:
+    entry: examples/bitvector-test.cxy
+    output: bitvector-example
+
+  rtl-plugin:
+    entry: src/plugin/rtl-plugin.c
+    output: rtl
+
+install:
+  - name: rtl
+    plugin:
+      entry: src/plugin/rtl-plugin.c
+      inputs:
+        - "src/plugin/**/*.c"
+        - "src/plugin/**/*.h"
+    required: true

@@ -1,0 +1,365 @@
+module heap
+
+import { Vector } from "stdlib/vector.cxy"
+
+/**
+ * DefaultHeapCmp - Default comparator for min-heap
+ * Uses < and > operators on type T
+ * Returns -1 if a < b, 0 if equal, 1 if a > b
+ */
+pub struct DefaultHeapCmp[T] {
+    const func `()`(a: &const T, b: &const T): i32 {
+        if a < b { return -1 }
+        if a > b { return 1 }
+        return 0
+    }
+}
+
+// Max-heap comparator (largest first)
+pub struct DefaultMaxCmp[T] {
+    const func `()`(a: &const T, b: &const T): i32 {
+        if a > b { return -1 }
+        if a < b { return 1 }
+        return 0
+    }
+}
+
+/**
+ * Heap[T, Cmp] - Generic binary min-heap priority queue
+ *
+ * A min-heap where the smallest element (by comparator) is at the root.
+ * Backed by a dynamic array (Vector) for efficient storage.
+ *
+ * The comparator struct must implement:
+ *   const func `()`(a: &const T, b: &const T): i32
+ * Returning:
+ *   -1 if a has higher priority than b (a should come before b)
+ *    0 if a and b have equal priority
+ *    1 if b has higher priority than a (b should come before a)
+ *
+ * Example with default comparator (min-heap):
+ *   var heap = Heap[i32, DefaultHeapCmp]{}
+ *   heap.push(5)
+ *   heap.push(2)
+ *   heap.push(8)
+ *   var min = heap.pop()  // Returns 2
+ *
+ * Example with custom comparator (max-heap):
+ *   struct MaxCmp[T] {
+ *       const func `()`(a: &const T, b: &const T): i32 {
+ *           if *a > *b { return -1 }
+ *           if *a < *b { return 1 }
+ *           return 0
+ *       }
+ *   }
+ *   var heap = Heap[i32, MaxCmp]{}
+ */
+pub class Heap[T, Cmp = DefaultHeapCmp[T]] {
+    _storage: Vector[T]
+    _cmp: Cmp[T]
+
+    /**
+     * Create a new heap
+     */
+    func `init`() {
+        _storage = Vector[T]()
+        _cmp = Cmp[T]{}
+    }
+
+    /**
+     * Add an element to the heap
+     * Time: O(log n)
+     */
+    func push(item: T) {
+        _storage.push(item)
+        _heapifyUp(_storage.size() - 1)
+    }
+
+    /**
+     * Remove and return the minimum element (root)
+     * Returns the element with highest priority according to comparison function
+     * Behavior undefined if heap is empty - check empty() first
+     * Time: O(log n)
+     */
+    func pop(): T {
+        // Caller should check empty() first
+        var result = _storage.move(0)
+
+        var lastIdx = _storage.size() - 1
+        if lastIdx > 0 {
+            _storage.swap(0, <i32>lastIdx)
+        }
+        _storage.pop()
+
+        if !_storage.empty() {
+            _heapifyDown(0)
+        }
+
+        return result
+    }
+
+    /**
+     * View the minimum element without removing it
+     * Returns null if heap is empty
+     * Time: O(1)
+     */
+    func peek(): Optional[&T] {
+        if _storage.empty() {
+            return null
+        }
+        return _storage.[<i32>0]
+    }
+
+    /**
+     * Check if heap is empty
+     * Time: O(1)
+     */
+    const func empty(): bool {
+        return _storage.empty()
+    }
+
+    /**
+     * Get number of elements in heap
+     * Time: O(1)
+     */
+    const func size(): u64 {
+        return _storage.size()
+    }
+
+    /**
+     * Remove all elements from heap
+     * Time: O(1)
+     */
+    func clear() {
+        _storage.clear()
+    }
+
+    // Private helper: restore heap property upward from index
+    func _heapifyUp(idx: u64): void {
+        if idx == 0 {
+            return
+        }
+
+        var parentIdx = (idx - 1) / 2
+        var current = _storage.[<i32>idx]
+        var parent = _storage.[<i32>parentIdx]
+
+        if _cmp(current, parent) < 0 {
+            _storage.swap(<i32>idx, <i32>parentIdx)
+            _heapifyUp(parentIdx)
+        }
+    }
+
+    // Private helper: restore heap property downward from index
+    func _heapifyDown(idx: u64): void {
+        var leftIdx = 2 * idx + 1
+        var rightIdx = 2 * idx + 2
+        var smallest = idx
+
+        if leftIdx < _storage.size() {
+            var left = _storage.[<i32>leftIdx]
+            var current = _storage.[<i32>smallest]
+            if _cmp(left, current) < 0 {
+                smallest = leftIdx
+            }
+        }
+
+        if rightIdx < _storage.size() {
+            var right = _storage.[<i32>rightIdx]
+            var current = _storage.[<i32>smallest]
+            if _cmp(right, current) < 0 {
+                smallest = rightIdx
+            }
+        }
+
+        if smallest != idx {
+            _storage.swap(<i32>idx, <i32>smallest)
+            _heapifyDown(smallest)
+        }
+    }
+}
+
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+test "Heap initialization" {
+    var heap = Heap[i32]()
+
+    ok!(heap.empty())
+    ok!(heap.size() == 0)
+}
+
+test "Heap push and peek" {
+    var heap = Heap[i32]()
+
+    heap.push(5)
+    ok!(!heap.empty())
+    ok!(heap.size() == 1)
+
+    var peeked = heap.peek()
+    ok!(!!peeked)
+    ok!(*peeked == 5)
+    ok!(heap.size() == 1)  // Peek doesn't remove
+}
+
+test "Heap pop single element" {
+    var heap = Heap[i32]()
+
+    heap.push(42)
+    var popped = heap.pop()
+
+    ok!(popped == 42)
+    ok!(heap.empty())
+}
+
+test "Heap min-heap ordering" {
+    var heap = Heap[i32]()
+
+    // Push in random order
+    heap.push(5)
+    heap.push(2)
+    heap.push(8)
+    heap.push(1)
+    heap.push(9)
+    heap.push(3)
+
+    ok!(heap.size() == 6)
+
+    // Should pop in ascending order
+    ok!(heap.pop() == 1)
+    ok!(heap.pop() == 2)
+    ok!(heap.pop() == 3)
+    ok!(heap.pop() == 5)
+    ok!(heap.pop() == 8)
+    ok!(heap.pop() == 9)
+
+    ok!(heap.empty())
+}
+
+test "Heap max-heap ordering with reversed comparator" {
+    var heap = Heap[i32, DefaultMaxCmp[i32]]()
+
+    heap.push(5)
+    heap.push(2)
+    heap.push(8)
+    heap.push(1)
+
+    // Should pop in descending order (largest first)
+    ok!(heap.pop() == 8)
+    ok!(heap.pop() == 5)
+    ok!(heap.pop() == 2)
+    ok!(heap.pop() == 1)
+}
+
+test "Heap with duplicate values" {
+    var heap = Heap[i32]()
+
+    heap.push(3)
+    heap.push(1)
+    heap.push(3)
+    heap.push(2)
+    heap.push(1)
+
+    ok!(heap.pop() == 1)
+    ok!(heap.pop() == 1)
+    ok!(heap.pop() == 2)
+    ok!(heap.pop() == 3)
+    ok!(heap.pop() == 3)
+}
+
+test "Heap clear" {
+    var heap = Heap[i32]()
+
+    heap.push(1)
+    heap.push(2)
+    heap.push(3)
+
+    ok!(heap.size() == 3)
+
+    heap.clear()
+
+    ok!(heap.empty())
+    ok!(heap.size() == 0)
+}
+
+test "Heap peek returns null when empty" {
+    var heap = Heap[i32]()
+
+    var peeked = heap.peek()
+    ok!(!peeked)
+}
+
+test {
+    // Test struct with operator overloading
+    struct Task {
+        priority: i32
+        name: string
+
+        const func `<`(other: &const Task): bool => priority < other.priority
+        const func `>`(other: &const Task): bool => priority > other.priority
+    }
+}
+
+test "Heap with struct elements" {
+    var heap = Heap[Task]()
+
+    heap.push(Task{priority: 5, name: "low"})
+    heap.push(Task{priority: 1, name: "high"})
+    heap.push(Task{priority: 3, name: "medium"})
+
+    var first = heap.pop()
+    ok!(first.priority == 1)
+    ok!(first.name == "high")
+
+    var second = heap.pop()
+    ok!(second.priority == 3)
+    ok!(second.name == "medium")
+
+    var third = heap.pop()
+    ok!(third.priority == 5)
+    ok!(third.name == "low")
+}
+
+test "Heap interleaved push and pop" {
+    var heap = Heap[i32]()
+
+    heap.push(5)
+    heap.push(2)
+    ok!(heap.pop() == 2)
+
+    heap.push(8)
+    heap.push(1)
+    ok!(heap.pop() == 1)
+
+    heap.push(3)
+    ok!(heap.pop() == 3)
+    ok!(heap.pop() == 5)
+    ok!(heap.pop() == 8)
+
+    ok!(heap.empty())
+}
+
+test "Heap large dataset" {
+    var heap = Heap[i32]()
+
+    // Push 100 elements in reverse order
+    var i = 100.i32
+    while i > 0 {
+        heap.push(i)
+        i -= 1
+    }
+
+    ok!(heap.size() == 100)
+
+    // Should pop in ascending order
+    var expected = 1.i32
+    while !heap.empty() {
+        var val = heap.pop()
+        ok!(val == expected)
+        expected += 1
+    }
+
+    ok!(expected == 101)
+}

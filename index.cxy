@@ -1,3 +1,34 @@
 package rtl
 
-export { hello } from "./src/hello.cxy"
+// Basic types
+export { Bit, Bit0, Bit1, BitX, BitZ } from "./src/bit.cxy"
+
+// BitVector - a vector of bits
+export { BitVector } from "./src/bitvector.cxy"
+
+// Time - includes literal suffix extensions (ps, ns, us, ms, sec)
+export { Time, TimeUnit, ps, ns, us, ms, sec } from "./src/time.cxy"
+
+// Clock
+export { Clock } from "./src/clock.cxy"
+
+// Events
+export { Event } from "./src/event.cxy"
+export { EventGroup } from "./src/event-group.cxy"
+
+// Ports
+export { InPort, OutPort, InOutPort, InBitPort, OutBitPort, InOutBitPort } from "./src/ports.cxy"
+
+// Signals
+export { SignalBase } from "./src/signal-base.cxy"
+export { Signal } from "./src/signal.cxy"
+
+export { BitSignal } from "./src/bit-signal.cxy"
+
+// Simulation infrastructure
+export { EventQueue } from "./src/event-queue.cxy"
+export { DeltaCycleManager } from "./src/delta-cycle-manager.cxy"
+export { SimContext, simContext, schedule, scheduleDelta, now, wait } from "./src/sim-context.cxy"
+
+// VCD tracing
+export { Vcd } from "./src/vcd.cxy"

@@ -1,0 +1,54 @@
+// Multi-event @method test
+//
+// Tests the new EventGroup functionality with ANY and ALL semantics
+
+import { Clock, Signal, simContext, now, ns, InPort, OutPort, EventGroup } from "../index.cxy"
+
+import plugin "rtl" as rtl
+
+@rtl::component
+class MultiEventTest {
+    @input clk: Clock
+    @input rst: bool
+    @input en: bool
+
+    // Test ANY semantics - wait for any event
+    @method(rst, en)
+    func onAnyChange() {
+        println(now(), ": onAnyChange: rst or en changed")
+    }
+
+    // Test ALL semantics - wait for all events
+    @method(_and, en, rst)
+    func onAllChange() {
+        println(now(), ": onAllChange: both en and rst changed")
+    }
+
+    // Test mixed syntax
+    @method(rst, clk: "posedge")
+    func onMixedEvents() {
+        println(now(), ": onMixedEvents: rst changed or clk posedge")
+    }
+
+    // Test single event (backward compatibility)
+    @method(clk: "posedge")
+    func onClockEdge() {
+        println(now(), ": onClockEdge: clock rising edge")
+    }
+}
+
+func main() {
+    var ctx = simContext()
+    var clk = Clock("clk", 10.ns)
+    var rst = Signal[bool](false)
+    var en = Signal[bool](false)
+    clk.start()
+    @unused var t = MultiEventTest(&clk, rst, en)
+
+    // Trigger some events
+    ctx.run(50.ns)
+    rst << true
+    en << true
+    ctx.run(10.ns)
+    println("Done")
+}

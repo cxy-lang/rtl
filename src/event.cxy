@@ -1,0 +1,162 @@
+module event
+
+import { Coroutine, Channel, running, suspend, resume, yld } from "stdlib/coro.cxy"
+import { HashSet } from "stdlib/hash.cxy"
+
+/**
+ * CoroHashable - Wrapper for ^Coroutine that implements hash and equality
+ */
+struct CoroHashable {
+    coro: ^Coroutine
+
+    const func op__hash(): u32 {
+        return (coro !: u64) as u32
+    }
+
+    const func `==`(other: &const CoroHashable): bool {
+        return (coro !: u64) == (other.coro !: u64)
+    }
+}
+
+/**
+ * Event - RTL synchronization primitive with coroutine support
+ *
+ * Provides a mechanism for coroutines to wait on and be notified of events.
+ * Uses HashSet[CoroHashable] for efficient waiter tracking and removal.
+ *
+ * This is the Phase 2 implementation with full coroutine integration.
+ */
+
+pub class Event {
+    _dbgName: string = null;
+    _waiters = HashSet[CoroHashable]();    // Coroutines waiting on this event
+
+    // Constructor
+    func `init`(name: string = null) {
+        _dbgName = name
+    }
+
+    /**
+     * Wait on this event (suspend current coroutine until notified)
+     * Called by processes to block until event fires
+     */
+    func wait() {
+        var coro = running()
+        _waiters.insert(CoroHashable{coro: coro})
+        suspend()
+        _waiters.remove(CoroHashable{coro: coro})
+    }
+
+    /**
+     * Notify all waiting coroutines
+     * Resumes all processes waiting on this event
+     */
+    func notify() {
+        for waiter in _waiters {
+            if waiter.coro.ready { continue }
+            resume(waiter.coro, 0)
+        }
+        _waiters.clear()
+    }
+
+    /**
+     * Notify only one waiting coroutine (FIFO order)
+     * Resumes the first process waiting on this event
+     */
+    func notifyOne() {
+        for waiter in _waiters {
+            resume(waiter.coro, 0)
+            _waiters.remove(waiter)
+            return
+        }
+    }
+
+    /**
+     * Remove a specific coroutine from waiters (for EventGroup cleanup)
+     */
+    func _removeWaiter(coro: ^Coroutine) {
+        _waiters.remove(CoroHashable{coro: coro})
+    }
+
+    /**
+     * Register a coroutine as a waiter (for EventGroup multi-event wait)
+     */
+    func _registerWaiter(coro: ^Coroutine) {
+        _waiters.insert(CoroHashable{coro: coro})
+    }
+
+    /**
+     * Check if anyone is waiting on this event
+     */
+    const func hasWaiters(): bool {
+        return _waiters.size() > 0
+    }
+
+    /**
+     * Get the number of waiting coroutines
+     */
+    const func waiterCount(): u64 {
+        return _waiters.size()
+    }
+
+    const func `==`(other: &const Event) {
+        return ((ptrof this) !: ^const void) == ((ptrof other) !: ^const void)
+    }
+
+    func dbgName(): string {
+        return _dbgName
+    }
+
+    func setDbgName(name: string) {
+        _dbgName = name
+    }
+}
+
+test {
+    struct TestData {
+        count: u64 = 0
+        func reset() {
+            count = 0
+        }
+    }
+    var data = TestData{}
+
+    func testWait(event: &Event) {
+        event.wait()
+        data.count++
+    }
+}
+
+// Tests
+test "Event initialization" {
+    var event = Event()
+    ok!(!event.hasWaiters())
+    ok!(event.waiterCount() == 0)
+}
+
+test "Event notify with no waiters" {
+    var event = Event()
+    event.notify()  // Should not crash
+    ok!(!event.hasWaiters())
+}
+
+test "Event notifyOne with no waiters" {
+    var event = Event()
+    event.notifyOne()  // Should not crash
+    ok!(!event.hasWaiters())
+}
+
+test "Event waiter count" {
+    var event = Event()
+    ok!(event.waiterCount() == 0)
+    ok!(!event.hasWaiters())
+}
+
+test "Event wait and notify" {
+    var event = Event()
+    async testWait(event)
+    event.notify()
+    yld()
+    ok!(data.count == 1)
+    ok!(!event.hasWaiters())
+}

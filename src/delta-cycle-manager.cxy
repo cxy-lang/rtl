@@ -1,0 +1,517 @@
+module delta_cycle_manager
+
+import { Event } from "./event.cxy"
+import { SignalBase } from "./signal-base.cxy"
+import { Vector } from "stdlib/vector.cxy"
+import { yld } from "stdlib/coro.cxy"
+import { Coroutine, running, suspend, resume } from "stdlib/coro.cxy"
+import { Heap, DefaultHeapCmp } from "./heap.cxy"
+
+/**
+ * WaitingProcess - Tracks a coroutine waiting to resume after N delta cycles
+ */
+struct WaitingProcess {
+    targetDelta: u32   // Absolute delta cycle to wake up at
+    coro: ^Coroutine    // Coroutine to resume
+
+    // Comparison operators for min-heap ordering (earliest wake-up first)
+    const func `<`(other: &const WaitingProcess): bool {
+        return targetDelta < other.targetDelta
+    }
+
+    const func `>`(other: &const WaitingProcess): bool {
+        return targetDelta > other.targetDelta
+    }
+}
+
+/**
+ * DeltaCycleManager - Orchestrates zero-time evaluation-update cycles
+ *
+ * Key concept: In hardware simulation, all processes see a consistent
+ * snapshot of state during evaluation. Changes are scheduled, then
+ * committed atomically in the update phase.
+ *
+ * This prevents race conditions and ensures deterministic ordering.
+ *
+ * Process:
+ * 1. Evaluate: processes run, schedule writes via signal << value
+ * 2. Update: commit all pending writes, fire valueChanged events
+ * 3. Repeat until stable (no new events)
+ * 4. Detect infinite loops
+ *
+ * NOTE: For Phase 2, this is a simplified implementation.
+ * Signals will integrate with a global SimContext that uses this manager.
+ * The actual signal update coordination happens through that integration.
+ */
+pub class DeltaCycleManager {
+    _deltaEvents = Vector[Event]()       // Events fired during update phase
+    _dirtySignals = Vector[SignalBase]() // Signals with pending updates
+    _maxDeltaCycles = 1000.u32           // Maximum number of delta cycles to process
+    _currentDelta = 0.u32
+    _waitingProcesses = Heap[WaitingProcess]()
+
+    func `init`() {}
+
+    /**
+     * Register a signal that has a pending update
+     */
+    func registerDirtySignal(signal: SignalBase) {
+        _dirtySignals.push(&&signal)
+    }
+
+    /**
+     * Add an event to fire in the next delta cycle
+     */
+    func scheduleDeltaEvent(event: Event) {
+        _deltaEvents.push(&&event)
+    }
+
+    /**
+     * Schedule a coroutine to resume after N delta cycles
+     * Called by wait(n) function
+     */
+    func scheduleWait(numDeltas: u32, coro: ^Coroutine) {
+        var targetDelta = _currentDelta + numDeltas
+        _waitingProcesses.push(WaitingProcess{
+            targetDelta: targetDelta,
+            coro: coro
+        })
+    }
+
+    /**
+     * Resume all processes that should wake up at current delta cycle
+     * Called at start of each delta cycle
+     */
+    func _resumeReadyProcesses() {
+        while !_waitingProcesses.empty() {
+            var earliest = _waitingProcesses.peek()
+            if !earliest || earliest&.targetDelta > _currentDelta {
+                break  // No more ready processes
+            }
+
+            // Pop and resume
+            var proc = _waitingProcesses.pop()
+            if !proc.coro.ready {
+                resume(proc.coro, 0)
+            }
+        }
+    }
+
+    /**
+     * Process one delta cycle: commit all pending writes and fire events
+     * Returns true if any updates occurred (need another delta)
+     */
+    func processDeltaCycle(): bool {
+        // Check if we have any work to do
+        var hasWork = !_dirtySignals.empty() || !_deltaEvents.empty() || !_waitingProcesses.empty()
+
+        if !hasWork {
+            _currentDelta = 0
+            return false  // No work, we're stable
+        }
+
+        _currentDelta += 1
+        if _currentDelta > _maxDeltaCycles {
+            // TODO: Use panic when available
+            // For now, just stop
+            return false
+        }
+
+        // Update phase: commit all dirty signal writes
+        var hadUpdates = !_dirtySignals.empty()
+        for sig in _dirtySignals {
+            if sig.0.isDirty() && sig.0._update() {
+                // Value changed - schedule valueChanged event for next evaluation
+                _deltaEvents.push(sig.0.valueChanged)
+            }
+        }
+        _dirtySignals.clear()
+
+        // Evaluation phase: fire all delta events (may wake processes that schedule more writes)
+        while !_deltaEvents.empty() {
+            var event = _deltaEvents.pop()
+            event.notify()
+            yld()  // Let resumed coroutines execute
+        }
+
+        // Resume processes waiting for this delta cycle (after signals have settled)
+        _resumeReadyProcesses()
+
+        // Deadlock detection: if no signal updates but processes are still waiting
+        if !hadUpdates && !_waitingProcesses.empty() {
+            // TODO: Add proper warning/logging when available
+            // For now, wake up all waiting processes to prevent deadlock
+            while !_waitingProcesses.empty() {
+                var proc = _waitingProcesses.pop()
+                if !proc.coro.ready {
+                    resume(proc.coro, 0)
+                }
+            }
+        }
+
+        return hadUpdates
+    }
+
+    /**
+     * Run delta cycles until stable (no more updates)
+     * Returns number of delta cycles executed
+     */
+    func runUntilStable(): u32 {
+        var startDelta = _currentDelta
+        while processDeltaCycle() {
+            // Keep processing until stable
+        }
+        return _currentDelta - startDelta
+    }
+
+    /**
+     * Reset delta cycle counter (called when advancing simulation time)
+     */
+    func reset() {
+        _currentDelta = 0
+        _dirtySignals.clear()
+        _deltaEvents = Vector[Event]()
+        _waitingProcesses.clear()
+    }
+
+    /**
+     * Get current delta cycle number
+     */
+    const func currentDelta(): u32 {
+        return _currentDelta
+    }
+
+    /**
+     * Check if we're in a delta cycle
+     */
+    const func inDeltaCycle(): bool {
+        return _currentDelta > 0
+    }
+
+    /**
+     * Check if there are pending updates (used by SimContext)
+     */
+    const func hasPendingUpdates(): bool {
+        return !_dirtySignals.empty() || !_deltaEvents.empty() || !_waitingProcesses.empty()
+    }
+}
+
+// Tests
+test "DeltaCycleManager initialization" {
+    var mgr = DeltaCycleManager()
+    ok!(mgr.currentDelta() == 0)
+    ok!(!mgr.inDeltaCycle())
+    ok!(!mgr.hasPendingUpdates())
+}
+
+test "DeltaCycleManager register dirty signal" {
+    var mgr = DeltaCycleManager()
+    var sig = SignalBase()
+
+    mgr.registerDirtySignal(sig)
+    ok!(mgr.hasPendingUpdates())
+
+    var result = mgr.processDeltaCycle()
+    ok!(result)
+    ok!(mgr.currentDelta() == 1)
+}
+
+test "DeltaCycleManager reset" {
+    var mgr = DeltaCycleManager()
+    var sig = SignalBase()
+
+    mgr.registerDirtySignal(sig)
+    mgr.processDeltaCycle()
+    ok!(mgr.currentDelta() == 1)
+
+    mgr.reset()
+    ok!(mgr.currentDelta() == 0)
+    ok!(!mgr.hasPendingUpdates())
+}
+
+test "DeltaCycleManager multiple deltas" {
+    var mgr = DeltaCycleManager()
+    var sig = SignalBase()
+
+    // Simulate 3 delta cycles
+    mgr.registerDirtySignal(sig)
+    mgr.processDeltaCycle()
+    ok!(mgr.currentDelta() == 1)
+
+    mgr.registerDirtySignal(sig)
+    mgr.processDeltaCycle()
+    ok!(mgr.currentDelta() == 2)
+
+    mgr.registerDirtySignal(sig)
+    mgr.processDeltaCycle()
+    ok!(mgr.currentDelta() == 3)
+}
+
+test {
+    // Module-level test helpers
+    var g_fired1 = false
+    var g_fired2 = false
+    var g_eventFired = false
+    var g_event1: Event = null
+    var g_event2: Event = null
+    var g_event: Event = null
+    var g_mgr: DeltaCycleManager = null
+    var g_sig: SignalBase = null
+
+    func waiter1() {
+        g_event1.wait()
+        g_fired1 = true
+    }
+
+    func waiter2() {
+        g_event2.wait()
+        g_fired2 = true
+    }
+
+    func waiter() {
+        g_event.wait()
+        g_eventFired = true
+        // Simulate that event firing triggers more updates
+        g_mgr.registerDirtySignal(g_sig)
+    }
+
+}
+
+test "DeltaCycleManager schedule and fire delta events" {
+    var mgr = DeltaCycleManager()
+    g_event1 = Event()
+    g_event2 = Event()
+    g_fired1 = false
+    g_fired2 = false
+
+    // Spawn waiters
+    async waiter1()
+    async waiter2()
+
+    // Schedule events to fire in next delta
+    mgr.scheduleDeltaEvent(g_event1)
+    mgr.scheduleDeltaEvent(g_event2)
+
+    ok!(mgr.hasPendingUpdates())
+
+    // Process delta cycle - should fire both events
+    // NOTE: processDeltaCycle returns false here because we have no actual updates,
+    // only events to fire. This is expected behavior.
+    var result = mgr.processDeltaCycle()
+    ok!(!result)
+
+    // Yield to let waiters run
+    yld()
+
+    ok!(g_fired1)
+    ok!(g_fired2)
+}
+
+test "DeltaCycleManager runUntilStable completes" {
+    var mgr = DeltaCycleManager()
+    var sig = SignalBase()
+
+    // Schedule update
+    mgr.registerDirtySignal(sig)
+
+    // runUntilStable should process until stable
+    mgr.runUntilStable()
+
+    ok!(!mgr.hasPendingUpdates())
+}
+
+test "DeltaCycleManager stable state returns false" {
+    var mgr = DeltaCycleManager()
+
+    // No pending updates or events
+    var result = mgr.processDeltaCycle()
+    ok!(!result)
+    ok!(mgr.currentDelta() == 0)
+}
+
+test "DeltaCycleManager delta limit detection" {
+    var mgr = DeltaCycleManager()
+    var sig = SignalBase()
+
+    // Simulate infinite loop by continuously adding updates
+    var loopCount = 0.i32
+    while loopCount < 1005 {
+        mgr.registerDirtySignal(sig)
+        var result = mgr.processDeltaCycle()
+
+        if !result {
+            // Hit the limit and stopped
+            ok!(mgr.currentDelta() > 1000)
+            break
+        }
+
+        loopCount += 1
+    }
+
+    // Should have hit the limit
+    ok!(loopCount < 1005)
+}
+
+test "DeltaCycleManager reset clears delta events" {
+    var mgr = DeltaCycleManager()
+    var event = Event()
+
+    mgr.scheduleDeltaEvent(event)
+    ok!(mgr.hasPendingUpdates())
+
+    mgr.reset()
+    ok!(!mgr.hasPendingUpdates())
+}
+
+test "DeltaCycleManager interleaved updates and events" {
+    var mgr = DeltaCycleManager()
+    var sig = SignalBase()
+    g_event = Event()
+    g_eventFired = false
+    g_mgr = mgr
+    g_sig = sig
+
+    async waiter()
+
+    // Start with update and event
+    mgr.registerDirtySignal(sig)
+    mgr.scheduleDeltaEvent(g_event)
+
+    // First cycle: process update, fire event
+    var result1 = mgr.processDeltaCycle()
+    ok!(result1)
+    ok!(mgr.currentDelta() == 1)
+
+    // Yield to let waiter run (it schedules another update)
+    yld()
+    ok!(g_eventFired)
+
+    // Second cycle: process the update triggered by event
+    var result2 = mgr.processDeltaCycle()
+    ok!(result2)
+    ok!(mgr.currentDelta() == 2)
+
+    // Now should be stable
+    var result3 = mgr.processDeltaCycle()
+    ok!(!result3)
+}
+
+// ============================================================================
+// WAIT FUNCTIONALITY TESTS
+// ============================================================================
+
+test {
+    struct TestData {
+        resumed: bool = false
+        count: i32 = 0
+        deltaAtResume: u32 = 0
+
+        func reset() {
+            resumed = false
+            count = 0
+            deltaAtResume = 0
+        }
+    }
+
+    func waiterProcess(mgr: &DeltaCycleManager, data: &TestData, waitDeltas: u32) {
+        var coro = running()
+        mgr.scheduleWait(waitDeltas, coro)
+        suspend()
+        data.resumed = true
+        data.deltaAtResume = mgr.currentDelta()
+    }
+
+    func multiWaiterProcess(mgr: &DeltaCycleManager, data: &TestData, waitDeltas: u32, id: i32) {
+        var coro = running()
+        mgr.scheduleWait(waitDeltas, coro)
+        suspend()
+        data.count += id
+    }
+}
+
+test "DeltaCycleManager scheduleWait basic" {
+    var mgr = DeltaCycleManager()
+    var data = TestData{}
+
+    // Start at delta 0, schedule wait for 3 deltas
+    async waiterProcess(&mgr, &data, 3)
+
+    ok!(mgr.hasPendingUpdates())
+    ok!(!data.resumed)
+
+    // Process delta 1 - should not resume yet
+    var sig = SignalBase()
+    mgr.registerDirtySignal(sig)
+    mgr.processDeltaCycle()
+    ok!(!data.resumed)
+    ok!(mgr.currentDelta() == 1)
+
+    // Process delta 2 - still waiting
+    mgr.registerDirtySignal(sig)
+    mgr.processDeltaCycle()
+    ok!(!data.resumed)
+    ok!(mgr.currentDelta() == 2)
+
+    // Process delta 3 - should resume now (0 + 3 = 3)
+    mgr.registerDirtySignal(sig)
+    mgr.processDeltaCycle()
+    yld()  // Let resumed coroutine run
+    ok!(data.resumed)
+    ok!(data.deltaAtResume == 3)
+}
+
+test "DeltaCycleManager multiple waiting processes" {
+    var mgr = DeltaCycleManager()
+    var data = TestData{}
+
+    // Schedule 3 processes with different wait times
+    async multiWaiterProcess(&mgr, &data, 1, 1)   // Resume at delta 1
+    async multiWaiterProcess(&mgr, &data, 2, 10)  // Resume at delta 2
+    async multiWaiterProcess(&mgr, &data, 3, 100) // Resume at delta 3
+
+    var sig = SignalBase()
+
+    // Delta 1 - first process resumes
+    mgr.registerDirtySignal(sig)
+    mgr.processDeltaCycle()
+    yld()
+    ok!(data.count == 1)
+
+    // Delta 2 - second process resumes
+    mgr.registerDirtySignal(sig)
+    mgr.processDeltaCycle()
+    yld()
+    ok!(data.count == 11)
+
+    // Delta 3 - third process resumes
+    mgr.registerDirtySignal(sig)
+    mgr.processDeltaCycle()
+    yld()
+    ok!(data.count == 111)
+}
+
+test "DeltaCycleManager wait with no updates triggers deadlock handler" {
+    var mgr = DeltaCycleManager()
+    var data = TestData{}
+
+    async waiterProcess(&mgr, &data, 10)
+
+    // Process one cycle with no signal updates
+    // Deadlock handler should wake up waiting process
+    var result = mgr.processDeltaCycle()
+    yld()
+
+    ok!(data.resumed)  // Should be woken up by deadlock handler
+    ok!(!mgr.hasPendingUpdates())  // Queue should be empty
+}
+
+test "DeltaCycleManager reset clears waiting processes" {
+    var mgr = DeltaCycleManager()
+    var data = TestData{}
+
+    async waiterProcess(&mgr, &data, 5)
+    ok!(mgr.hasPendingUpdates())
+
+    mgr.reset()
+    ok!(!mgr.hasPendingUpdates())
+}

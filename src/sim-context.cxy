@@ -1,0 +1,247 @@
+module sim_context
+
+import { Time, ns } from "./time.cxy"
+import { Event } from "./event.cxy"
+import { EventQueue } from "./event-queue.cxy"
+import { DeltaCycleManager } from "./delta-cycle-manager.cxy"
+import { yld, running, suspend } from "stdlib/coro.cxy"
+
+// SimContext - Main simulation orchestrator
+// Singleton that coordinates event queue, delta cycle manager, and simulation time
+// Implements the main simulation loop
+pub class SimContext {
+    _eventQueue: EventQueue
+    _deltaMgr: DeltaCycleManager
+    _currentTime: Time
+    _stopTime: Time
+
+    // Constructor
+    func `init`() {
+        _eventQueue = EventQueue()
+        _deltaMgr = DeltaCycleManager()
+        _currentTime = 0.ns
+        _stopTime = 0.ns
+    }
+
+    // Schedule an event to fire at a specific time
+    func schedule(time: Time, event: Event) {
+        if time < _currentTime {
+            // Cannot schedule events in the past
+            return
+        }
+
+        _eventQueue.push(time, 0, &&event)  // Delta 0 for timed events
+    }
+
+    // Schedule a delta event (fires in next delta cycle at current time)
+    func scheduleDelta(event: Event) {
+        _deltaMgr.scheduleDeltaEvent(&&event)
+    }
+
+    // Get current simulation time
+    func currentTime(): Time => _currentTime
+
+    // Get delta cycle manager (for signal registration)
+    func deltaMgr() => &_deltaMgr
+
+    // Check if simulation is running
+    func isRunning(): bool => _currentTime < _stopTime
+
+    // Run simulation for a given duration
+    func run(duration: Time) {
+        _stopTime = _currentTime + duration
+
+        while _currentTime < _stopTime {
+            // Check if there are any timed events
+            if _eventQueue.empty() && !_deltaMgr.hasPendingUpdates() {
+                // No more events, simulation is idle
+                break
+            }
+
+            // Process delta cycles at current time if needed
+            if _deltaMgr.hasPendingUpdates() {
+                _deltaMgr.runUntilStable()
+                continue
+            }
+
+            {
+                // Get next timed event
+                var timedEvent = _eventQueue.peek()
+                if !timedEvent {
+                    break
+                }
+
+                // Check if event is beyond stop time
+                if timedEvent&.time > _stopTime {
+                    break
+                }
+
+                // Advance to event time
+                _currentTime = timedEvent&.time
+            }
+
+            // Remove event from queue and push to delta events
+            var event = _eventQueue.pop()
+            _deltaMgr.scheduleDeltaEvent(&&event)
+
+            // Run delta cycles to process any updates triggered by the event
+            _deltaMgr.runUntilStable()
+        }
+
+        // Advance to stop time if we completed early
+        if _currentTime < _stopTime {
+            _currentTime = _stopTime
+        }
+    }
+
+    // Reset simulation to time zero
+    func reset() {
+        _currentTime = 0.ns
+        _stopTime = 0.ns
+        _eventQueue.clear()
+        _deltaMgr.reset()
+    }
+}
+
+// Global singleton instance
+var _globalSimContext: SimContext = null
+
+// Global convenience functions
+
+// Get the global simulation context
+pub func simContext(): &SimContext {
+    if _globalSimContext == null {
+        _globalSimContext = SimContext()
+    }
+    return &_globalSimContext
+}
+
+// Schedule an event at a specific time
+pub func schedule(time: Time, event: Event) {
+    simContext().schedule(time, &&event)
+}
+
+// Schedule a delta event
+pub func scheduleDelta(event: Event) {
+    simContext().scheduleDelta(&&event)
+}
+
+// Get current simulation time
+pub func now(): Time => simContext().currentTime()
+
+// Wait for a specific event to occur
+pub func wait(deltas: u32) {
+    var coro = running()
+    simContext().deltaMgr().scheduleWait(deltas, coro)
+    suspend()
+}
+
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+test {
+    struct TestContext {
+       waiting: bool = false
+       done: bool = false
+    }
+
+    var data = TestContext{}
+
+    func waitForEvent(event: Event) {
+        data.waiting = true
+        event.wait()
+        data.waiting = false
+        data.done = true
+    }
+}
+
+test "SimContext initialization" {
+    var ctx = SimContext()
+
+    ok!(ctx.currentTime() == 0.ns)
+    ok!(!ctx.isRunning())
+}
+
+test "SimContext schedule future event" {
+    var ctx = SimContext()
+    var event = Event()
+
+    ctx.schedule(10.ns, event)
+
+    // Event should be in queue (we can't directly check, but run will process it)
+    ok!(ctx.currentTime() == 0.ns)
+}
+
+test "SimContext schedule past event" {
+    var ctx = SimContext()
+    ctx.run(10.ns)  // Advance time
+
+    var event = Event()
+    ctx.schedule(5.ns, event)  // Try to schedule in past
+
+    // Should be ignored (we'd need to check queue is still at same size)
+    ok!(ctx.currentTime() == 10.ns)
+}
+
+test "SimContext run with no events" {
+    var ctx = SimContext()
+
+    ctx.run(10.ns)
+
+    ok!(ctx.currentTime() == 10.ns)
+    ok!(!ctx.isRunning())
+}
+
+test "SimContext run with single event" {
+    var ctx = SimContext()
+    var event = Event()
+    async waitForEvent(event)
+    ok!(data.waiting)
+    // Set up event listener (would normally be a coroutine wait)
+    // For now just test that time advances to event
+    ctx.schedule(10.ns, event)
+    ctx.run(20.ns)
+
+    ok!(ctx.currentTime() == 20.ns)
+    ok!(!data.waiting)
+    ok!(data.done)
+}
+
+test "SimContext run stops at duration" {
+    var ctx = SimContext()
+
+    // Schedule event beyond run duration
+    var event = Event()
+    ctx.schedule(50.ns, event)
+
+    ctx.run(30.ns)
+
+    // Should stop at 30ns, not process 50ns event
+    ok!(ctx.currentTime() == 30.ns)
+}
+
+test "SimContext reset" {
+    var ctx = SimContext()
+    var event = Event()
+
+    ctx.schedule(10.ns, event)
+    ctx.run(5.ns)
+
+    ctx.reset()
+
+    ok!(ctx.currentTime() == 0.ns)
+    ok!(!ctx.isRunning())
+}
+
+test "SimContext global now() function" {
+    var ctx = simContext()
+    ctx.reset()  // Ensure clean state
+
+    ok!(now() == 0.ns)
+
+    ctx.run(10.ns)
+
+    ok!(now() == 10.ns)
+}

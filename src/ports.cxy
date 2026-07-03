@@ -1,0 +1,423 @@
+module ports
+
+import { Signal } from "./signal.cxy"
+import { Event } from "./event.cxy"
+import { BitSignal } from "./bit-signal.cxy"
+import { BitVector } from "./bitvector.cxy"
+
+/**
+ * InPort[T] - Input port providing read-only access to a Signal[T]
+ *
+ * Ports enable direction enforcement and clear component interfaces.
+ * InPort can only read from its bound signal, no write access.
+ */
+pub class InPort[T] {
+    _signal: Signal[T] = null
+
+    func `init`(signal: Signal[T]) {
+        _signal = &&signal
+    }
+
+    /**
+     * Read current value from bound signal
+     * Asserts if port is not bound
+     */
+    const func read() => _signal.read()
+
+    const func `deref`() => _signal.read()
+
+    /**
+     * Access the valueChanged event of the bound signal
+     * Asserts if port is not bound
+     */
+    func valueChanged() => _signal.valueChanged
+
+    func isBound() => _signal != null
+
+    func signal() => _signal
+}
+
+/**
+ * OutPort[T] - Output port providing write-only access to a Signal[T]
+ *
+ * OutPort can only write to its bound signal, no read access.
+ */
+pub class OutPort[T] {
+    _signal: Signal[T] = null
+
+    func `init`(signal: Signal[T]) {
+        _signal = &&signal
+    }
+
+    /**
+     * Write value to bound signal using << operator
+     * Asserts if port is not bound
+     */
+    @inline func `<<`(value: T) {
+        _signal.write(value)
+    }
+
+    /**
+     * Explicit write method (delegates to << operator)
+     */
+    @inline func write(value: T) {
+        _signal.write(value)
+    }
+
+    /**
+     * Check if port is bound to a signal
+     */
+    const func isBound() => _signal != null
+
+    func signal() => _signal
+}
+
+/**
+ * InOutPort[T] - Bidirectional port with both read and write access
+ *
+ * Used for tristate buses and bidirectional signals.
+ */
+pub class InOutPort[T] {
+    _signal: Signal[T] = null
+
+    func `init`(signal: Signal[T]) {
+        _signal = &&signal
+    }
+
+    /**
+     * Read current value from bound signal
+     * Asserts if port is not bound
+     */
+    const func read() => _signal.read()
+
+    const func `deref`() => _signal.read()
+
+    /**
+     * Write value to bound signal using << operator
+     * Asserts if port is not bound
+     */
+    func `<<`(value: T) {
+        _signal.write(&&value)
+    }
+
+    /**
+     * Explicit write method (delegates to << operator)
+     */
+    func write(value: T) {
+        _signal.write(&&value)
+    }
+
+    /**
+     * Check if port is bound to a signal
+     */
+    const func isBound() => _signal != null
+
+    /**
+     * Access the valueChanged event of the bound signal
+     * Asserts if port is not bound
+     */
+    func valueChanged(): Event {
+        assert!(_signal != null)
+        return _signal.valueChanged
+    }
+
+    func signal() => _signal
+}
+
+// ============================================================================
+// BitPort types - Specialized ports for BitSignal[N]
+// ============================================================================
+
+/**
+ * InBitPort[N] - Input port for BitSignal[N] with read-only access
+ *
+ * Specialized port type for bit vectors that provides:
+ * - Read-only access to BitSignal[N]
+ * - Access to valueChanged event
+ */
+pub class InBitPort[N] {
+    _signal: BitSignal[N] = null
+
+    func `init`(signal: BitSignal[N]) {
+        _signal = &&signal
+    }
+
+    /**
+     * Read current value from bound signal
+     */
+    const func read() => _signal.read()
+
+    const func `deref`() => _signal.read()
+
+    /**
+     * Access the valueChanged event
+     */
+    func valueChanged() => _signal.valueChanged
+
+    const func isBound() => _signal != null
+
+    func signal() => _signal
+}
+
+/**
+ * OutBitPort[N] - Output port for BitSignal[N] with write-only access
+ *
+ * Provides write-only access to a BitSignal[N], preventing reads
+ * from output ports (enforcing proper signal direction).
+ */
+pub class OutBitPort[N] {
+    _signal: BitSignal[N] = null
+
+    func `init`(signal: BitSignal[N]) {
+        _signal = &&signal
+    }
+
+    /**
+     * Write value to bound signal using << operator
+     */
+    @inline func `<<`(value: BitVector[N]) {
+        _signal << value
+    }
+
+    /**
+     * Explicit write method
+     */
+    @inline func write(value: BitVector[N]) {
+        _signal << value
+    }
+
+    const func isBound() => _signal != null
+
+    func signal() => _signal
+}
+
+/**
+ * InOutBitPort[N] - Bidirectional port for BitSignal[N]
+ *
+ * Provides both read and write access to a BitSignal[N].
+ * Used for bidirectional buses and tristate signals.
+ */
+pub class InOutBitPort[N] {
+    _signal: BitSignal[N] = null
+
+    func `init`(signal: BitSignal[N]) {
+        _signal = &&signal
+    }
+
+    /**
+     * Read current value
+     */
+    const func read() => _signal.read()
+
+    const func `deref`() => _signal.read()
+
+    /**
+     * Write value using << operator
+     */
+    func `<<`(value: BitVector[N]) {
+        _signal << value
+    }
+
+    /**
+     * Explicit write method
+     */
+    func write(value: BitVector[N]) {
+        _signal << value
+    }
+
+    /**
+     * Access the valueChanged event
+     */
+    func valueChanged() => _signal.valueChanged
+
+    const func isBound() => _signal != null
+
+    func signal() => _signal
+}
+
+// ============================================================================
+// Tests and Examples
+// ============================================================================
+test {
+
+// Test helper struct for integration test
+struct SimpleBuffer {
+    input: InPort[u32]
+    output: OutPort[u32]
+
+    func `init`(inp: Signal[u32], out: Signal[u32]) {
+        input = InPort[u32](&&inp)
+        output = OutPort[u32](&&out)
+    }
+
+    func transfer() {
+        output << input.read()
+    }
+}
+
+}
+
+// Tests for InPort
+test "InPort initialization" {
+    var port = InPort[u32](null)
+    ok!(!port.isBound())
+}
+
+test "InPort binding" {
+    var sig = Signal[u32](42)
+    var port = InPort[u32](sig)
+
+    ok!(port.isBound())
+}
+
+test "InPort read delegates to signal" {
+    var sig = Signal[i32](123)
+    var port = InPort[i32](sig)
+
+    ok!(port.read() == 123)
+}
+
+test "InPort read reflects signal changes" {
+    var sig = Signal[u32](10)
+    var port = InPort[u32](sig)
+
+    ok!(port.read() == 10)
+
+    sig << 20
+    sig.commitPendingWrite()
+
+    ok!(port.read() == 20)
+}
+
+test "InPort multiple ports to same signal" {
+    var sig = Signal[u32](100)
+    var port1 = InPort[u32](sig)
+    var port2 = InPort[u32](sig)
+
+    ok!(port1.read() == 100)
+    ok!(port2.read() == 100)
+
+    sig << 200
+    sig.commitPendingWrite()
+
+    ok!(port1.read() == 200)
+    ok!(port2.read() == 200)
+}
+
+test "InPort with bool type" {
+    var sig = Signal[bool](true)
+    var port = InPort[bool](sig)
+
+    ok!(port.read())
+
+    sig << false
+    sig.commitPendingWrite()
+
+    ok!(!port.read())
+}
+
+// Tests for OutPort
+test "OutPort initialization" {
+    var port = OutPort[u32](null)
+    ok!(!port.isBound())
+}
+
+test "OutPort binding" {
+    var sig = Signal[u32](0)
+    var port = OutPort[u32](sig)
+
+    ok!(port.isBound())
+}
+
+test "OutPort write using << operator" {
+    var sig = Signal[u32](0)
+    var port = OutPort[u32](sig)
+
+    port << 42
+    sig.commitPendingWrite()
+
+    ok!(sig.read() == 42)
+}
+
+test "OutPort write using write method" {
+    var sig = Signal[i32](10)
+    var port = OutPort[i32](sig)
+
+    port.write(99)
+    sig.commitPendingWrite()
+
+    ok!(sig.read() == 99)
+}
+
+test "OutPort multiple writes" {
+    var sig = Signal[u32](0)
+    var port = OutPort[u32](sig)
+
+    port << 10
+    port << 20
+    port << 30
+    sig.commitPendingWrite()
+
+    ok!(sig.read() == 30)
+}
+
+test "OutPort with bool type" {
+    var sig = Signal[bool](false)
+    var port = OutPort[bool](sig)
+
+    port << true
+    sig.commitPendingWrite()
+
+    ok!(sig.read())
+}
+
+// Tests for InOutPort
+test "InOutPort initialization" {
+    var port = InOutPort[u32](null)
+    ok!(!port.isBound())
+}
+
+test "InOutPort binding" {
+    var sig = Signal[u32](0)
+    var port = InOutPort[u32](sig)
+
+    ok!(port.isBound())
+}
+
+test "InOutPort read and write" {
+    var sig = Signal[u32](50)
+    var port = InOutPort[u32](sig)
+
+    ok!(port.read() == 50)
+
+    port << 100
+    sig.commitPendingWrite()
+
+    ok!(port.read() == 100)
+}
+
+test "InOutPort bidirectional operation" {
+    var sig = Signal[i32](0)
+    var port = InOutPort[i32](sig)
+
+    var val1 = port.read()
+    ok!(val1 == 0)
+
+    port.write(25)
+    sig.commitPendingWrite()
+
+    var val2 = port.read()
+    ok!(val2 == 25)
+}
+
+// Integration test: Manual component with ports
+test "Component with ports transfers data" {
+    var inSig = Signal[u32](42)
+    var outSig = Signal[u32](0)
+    var buffer = SimpleBuffer(inSig, outSig)
+
+    buffer.transfer()
+    outSig.commitPendingWrite()
+
+    ok!(outSig.read() == 42)
+}

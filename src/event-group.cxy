@@ -1,0 +1,134 @@
+module event_group
+
+import { Coroutine, running, suspend, yld } from "stdlib/coro.cxy"
+import { Vector } from "stdlib/vector.cxy"
+import { Event } from "./event.cxy"
+
+/**
+ * EventGroup - Wait on multiple events with ANY or ALL semantics
+ *
+ * Allows processes to synchronize on multiple events:
+ * - waitAny(): Resume when ANY event fires (OR semantics)
+ * - waitAll(): Resume when ALL events have fired (AND/barrier semantics)
+ *
+ * Created on-demand in process wrappers for multi-event sensitivity.
+ */
+pub class EventGroup {
+    _events = Vector[Event]()
+
+    /**
+     * Constructor - accepts vector of events
+     * Usage: EventGroup([&ev1, &ev2, &ev3])
+     */
+    func `init`(...events: auto) {
+        #for ev in events {
+            _events.push(&&#{ev})
+        }
+    }
+
+    func addEvent(event: Event) {
+        _events.push(&&#{event})
+    }
+
+    /**
+     * Wait for ANY event to fire (OR semantics)
+     *
+     * Subscribes to all events, suspends, then cleans up when resumed.
+     * The event that fires will resume this coroutine.
+     */
+    func waitAny() {
+        var coro = running()
+
+        // Register with all events
+        for event in _events {
+            event.0._registerWaiter(coro)
+        }
+
+        suspend()
+
+        // ONE event fired and resumed us
+        // Cleanup: remove from all events (including the one that fired)
+        for event in _events {
+            event.0._removeWaiter(coro)
+        }
+    }
+
+    /**
+     * Wait for ALL events to fire (AND/barrier semantics)
+     *
+     * Suspends once per event. Each event that fires will resume us once.
+     * After N resumes (where N = number of events), all have fired.
+     */
+    func waitAll() {
+        var coro = running()
+        var completed = _events.size()
+
+        // Register with all events
+        for event in _events {
+            event.0._registerWaiter(coro)
+        }
+
+        // Suspend N times (once per event)
+        while completed > 0 {
+            suspend()
+            // Event that resumed us already removed coro from its waiters
+            completed -= 1
+        }
+
+        // All events have fired!
+    }
+}
+
+// Tests
+test {
+    struct TestData {
+        resumed: bool = false
+    }
+    var data = TestData{}
+
+    func waiter(group: &EventGroup) {
+        group.waitAny()
+        data.resumed = true
+    }
+
+    func waiterAll(group: &EventGroup) {
+        group.waitAll()
+        data.resumed = true
+    }
+}
+
+test "EventGroup waitAny with first event" {
+    data.resumed = false
+    var ev1 = Event()
+    var ev2 = Event()
+    var ev3 = Event()
+    var group = EventGroup(ev1, ev2, ev3)
+    async waiter(&group)
+
+    ev1.notify()
+    yld()
+
+    ok!(data.resumed)
+    ok!(!ev1.hasWaiters())
+    ok!(!ev2.hasWaiters())
+    ok!(!ev3.hasWaiters())
+}
+
+test "EventGroup waitAll requires all events" {
+    data.resumed = false
+    var ev1 = Event()
+    var ev2 = Event()
+
+    var group = EventGroup(ev1, ev2)
+    async waiterAll(&group)
+
+    // Fire first event - should NOT complete
+    ev1.notify()
+    yld()
+    ok!(!data.resumed)
+
+    // Fire second event - should complete
+    ev2.notify()
+    yld()
+    ok!(data.resumed)
+}

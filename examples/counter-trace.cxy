@@ -1,0 +1,48 @@
+import { Clock, ns, Signal, Bit, simContext, InPort, OutPort } from "../index.cxy"
+import { Vcd } from "../src/vcd.cxy"
+
+import plugin "rtl" as rtl
+
+@rtl::component
+class Counter {
+    @input clk: Clock
+    @input reset: Bit
+    @output count: u32
+
+    _value: u32 = 0
+
+    @method(clk: "posedge")
+    func increment() {
+        if *reset == Bit('1') {
+            _value = 0
+        } else {
+            _value += 1
+        }
+        count << _value
+    }
+}
+
+func main() {
+    var ctx = simContext()
+    var clk = Clock("clk", 10.ns)
+    var reset = Signal[Bit](Bit('1'))
+    var count = Signal[u32](0)
+    // Run simulation
+    clk.start()
+
+    var counter = Counter(&clk, reset, count)
+
+    // Create trace using plugin actions
+    var trace = rtl::vcd("counter.trace", clk)
+    rtl::trace(trace, reset, count)
+
+    // Reset phase
+    ctx.run(20.ns)
+
+    // Release reset and count
+    reset << Bit('0')
+    ctx.run(100.ns)
+
+    println("Counter simulation complete. Check counter.trace for waveforms. ",
+        count.read())
+}

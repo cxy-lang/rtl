@@ -1,0 +1,200 @@
+module signal
+
+import { Event } from "./event.cxy"
+import { SignalBase } from "./signal-base.cxy"
+import { simContext } from "./sim-context.cxy"
+
+/**
+ * Signal[T] - Generic communication channel for RTL components
+ *
+ * Provides typed signal with deferred update semantics (delta-cycle model).
+ * Writes are scheduled for next delta cycle, reads return current value.
+ */
+pub class Signal[T] : SignalBase {
+    _current: T
+    _next: Optional[T] = null
+    _dirty: bool = false
+
+    // Constructor with initial value
+    func `init`(initial: T, name: string = null) {
+        super(name)
+        _current = initial
+    }
+
+    // Read current value (immediate, no side effects)
+    const func read(): T {
+        return _current
+    }
+
+    // Alternative read method (alias for read)
+    const func get(): T {
+        return _current
+    }
+
+    const func `deref`(): T {
+        return _current
+    }
+
+    // Write operator - schedules update for next delta
+    func `<<`(value: T) {
+        _next = value
+        _dirty = true
+        // Register with simulation context for update phase
+        simContext().deltaMgr().registerDirtySignal(__copy!(this))
+    }
+
+    // Explicit write method (same as << operator)
+    func write(value: T) {
+        this << value
+    }
+
+    // Check if signal has pending write
+    const func isDirty(): bool {
+        return _dirty
+    }
+
+    // Update method - called by simulation kernel at end of delta
+    // Returns true if value actually changed
+    func _update(): bool {
+        if !_dirty {
+            return false
+        }
+
+        if !!_next {
+            var nextVal = *_next
+            var valueActuallyChanged = !(_current == nextVal)
+
+            _current = nextVal
+            _next = null
+            _dirty = false
+
+            return valueActuallyChanged
+        }
+
+        return false
+    }
+
+    // Manual update for testing (simulates delta cycle completion)
+    func commitPendingWrite() {
+        _update()
+    }
+
+    func dump(os: &OutputStream) {
+        #if T.isInteger {
+            os << Fmt("0x%x", _current)
+        } else {
+            os << _current
+        }
+    }
+
+    func vcdValue(): u64 {
+        #if T.isInteger || T.isEnum {
+            return _current as u64
+        } else #if T.`isBit {
+            return _current.value as u64
+        }
+        else {
+            return 0
+        }
+    }
+}
+
+// Tests
+test "Signal initialization with value" {
+    var sig = Signal[u32](0)
+    ok!(sig.read() == 0)
+    ok!(!sig.isDirty())
+}
+
+test "Signal read returns current value" {
+    var sig = Signal[i32](42)
+    ok!(sig.read() == 42)
+    ok!(sig.get() == 42)
+}
+
+test "Signal write marks as dirty but doesn't update immediately" {
+    var sig = Signal[u32](10)
+    ok!(sig.read() == 10)
+
+    sig << 20
+    ok!(sig.isDirty())
+    ok!(sig.read() == 10)  // Still reads old value!
+}
+
+test "Signal explicit write method" {
+    var sig = Signal[u32](5)
+    sig.write(15)
+    ok!(sig.isDirty())
+    ok!(sig.read() == 5)  // Old value until update
+}
+
+test "Signal update commits pending write" {
+    var sig = Signal[u32](100)
+    sig << 200
+    ok!(sig.read() == 100)
+
+    sig.commitPendingWrite()
+    ok!(sig.read() == 200)
+    ok!(!sig.isDirty())
+}
+
+test "Signal multiple writes before update" {
+    var sig = Signal[i32](1)
+    sig << 2
+    sig << 3
+    sig << 4
+
+    ok!(sig.read() == 1)  // Still old value
+    sig.commitPendingWrite()
+    ok!(sig.read() == 4)  // Last write wins
+}
+
+test "Signal update without write does nothing" {
+    var sig = Signal[u32](99)
+    sig.commitPendingWrite()
+    ok!(sig.read() == 99)
+    ok!(!sig.isDirty())
+}
+
+test "Signal with bool type" {
+    var sig = Signal[bool](false)
+    ok!(!sig.read())
+
+    sig << true
+    sig.commitPendingWrite()
+    ok!(sig.read())
+}
+
+test "Signal update returns true on value change" {
+    var sig = Signal[u32](10)
+
+    sig << 20
+    var changed = sig._update()
+    ok!(changed)
+    ok!(sig.read() == 20)
+}
+
+test "Signal update returns false if value unchanged" {
+    var sig = Signal[u32](10)
+
+    sig << 10  // Same value
+    var changed = sig._update()
+    ok!(!changed)
+}
+
+test "Signal delta cycle semantics" {
+    var sig = Signal[u32](0)
+
+    // Delta 0: Read and write
+    var val1 = sig.read()  // 0
+    sig << 1
+    var val2 = sig.read()  // Still 0 (delta cycle!)
+
+    ok!(val1 == 0)
+    ok!(val2 == 0)
+
+    // Delta 1: Update commits, new read sees new value
+    sig.commitPendingWrite()
+    var val3 = sig.read()  // Now 1
+    ok!(val3 == 1)
+}

@@ -1,0 +1,191 @@
+module clock
+
+import { Time, ns } from "./time.cxy"
+import { Bit } from "./bit.cxy"
+import { Signal } from "./signal.cxy"
+import { Event } from "./event.cxy"
+import { simContext } from "./sim-context.cxy"
+import { yld, suspend } from "stdlib/coro.cxy"
+
+// Clock - Periodic signal generator
+pub class Clock {
+    _period: Time
+    _running: bool = false
+    _value: Bit = Bit('0')
+    _name: String
+    posedge = Event()   // Fires on rising edge (0 -> 1)
+    negedge = Event()   // Fires on falling edge (1 -> 0)
+
+    // Constructor
+    func `init`(name: String, period: Time) {
+        _name = &&name
+        _period = period
+    }
+
+    // Start the clock generator coroutine
+    func start() {
+        if _running {
+            return  // Already running
+        }
+
+        _running = true
+        __async!(clockGenerator(), "clock_generator")
+    }
+
+    // Stop the clock generator
+    func stop() {
+        _running = false
+    }
+
+    // Clock generator coroutine
+    func clockGenerator(): void {
+        var ctx = simContext()
+        var wakeup = Event()
+        var halfPeriod = _period / 2
+
+        while _running {
+            // Schedule wakeup event
+            ctx.schedule(ctx.currentTime() + halfPeriod, wakeup)
+            wakeup.wait()
+            if !_running {
+                break
+            }
+
+            // Toggle the clock signal
+            var currentValue = _value
+            var newValue = currentValue ^ 1
+            _value = newValue
+            // Fire edge events
+            if newValue == 1 {
+                ctx.scheduleDelta(posedge)
+            } else {
+                ctx.scheduleDelta(negedge)
+            }
+
+            yld()  // Let other processes run
+        }
+    }
+
+    const func isHigh() => _value == 1
+    const func isLow() => _value == 0
+
+    const func name() => &_name
+    const func read() => _value
+    const func running() => _running
+    const func period() => _period
+}
+
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+test {
+    struct TestContext {
+        posedgeCount: u32 = 0
+        negedgeCount: u32 = 0
+    }
+
+    var data = TestContext{}
+
+    func countPosedges(clk: &Clock) {
+        while true {
+            clk.posedge.wait()
+            data.posedgeCount += 1
+        }
+    }
+
+    func countNegedges(clk: &Clock) {
+        while true {
+            clk.negedge.wait()
+            data.negedgeCount += 1
+        }
+    }
+}
+
+test "Clock initialization" {
+    var clk = Clock("clk", 10.ns)
+
+    ok!(clk.name() == "clk")
+    ok!(clk.isLow())  // Starts at 0
+    ok!(!clk.running())
+}
+
+test "Clock start and stop" {
+    var clk = Clock("clk", 10.ns)
+
+    clk.start()
+    ok!(clk.running())
+
+    clk.stop()
+    ok!(!clk.running())
+}
+
+test "Clock generates edges" {
+    var ctx = simContext()
+    ctx.reset()
+
+    var clk = Clock("clk", 10.ns)
+    data.posedgeCount = 0
+    data.negedgeCount = 0
+
+    async countPosedges(&clk)
+    async countNegedges(&clk)
+
+    clk.start()
+    ctx.run(50.ns)
+
+    // In 50ns with 10ns period:
+    // - 5 full cycles
+    // - Each cycle has 1 posedge and 1 negedge
+    ok!(data.posedgeCount == 5)
+    ok!(data.negedgeCount == 5)
+}
+
+test "Clock period" {
+    var ctx = simContext()
+    ctx.reset()
+
+    var clk = Clock("clk", 20.ns)
+    clk.start()
+
+    var initialTime = ctx.currentTime()
+
+    // Run for one full period
+    ctx.run(20.ns)
+
+    // Clock should have toggled twice (posedge at 10ns, negedge at 20ns)
+    ok!(ctx.currentTime() == initialTime + 20.ns)
+}
+
+test "Clock multiple start calls ignored" {
+    var clk = Clock("clk", 10.ns)
+
+    clk.start()
+    ok!(clk._running)
+
+    // Second start should be ignored
+    clk.start()
+    ok!(clk._running)
+}
+
+test "Clock stop halts generation" {
+    var ctx = simContext()
+    ctx.reset()
+
+    var clk = Clock("clk", 10.ns)
+    data.posedgeCount = 0
+
+    async countPosedges(&clk)
+
+    clk.start()
+    ctx.run(25.ns)
+
+    var countAfterRun = data.posedgeCount
+
+    clk.stop()
+    ctx.run(25.ns)  // Run more time
+
+    // Count should not increase after stop
+    ok!(data.posedgeCount == countAfterRun)
+}

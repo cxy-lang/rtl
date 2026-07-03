@@ -1,0 +1,71 @@
+module signal_test
+
+import { Clock, ns, Signal, Bit, simContext, InPort, OutPort } from "../index.cxy"
+
+import plugin "rtl" as rtl
+
+enum MyState: u8 {
+    @str("idle")
+    Idle,
+    @str("active")
+    Active
+}
+
+@rtl::component
+class TestComponent {
+    @input clk: Clock
+    @output out: Bit
+
+    @signal _state: MyState = MyState.Idle
+
+    @method(clk: "posedge")
+    func updateState() {
+        switch *_state {
+            .Idle => {
+                _state << MyState.Active
+            }
+            .Active => {
+                _state << MyState.Idle
+            }
+        }
+    }
+
+    @method(_state)
+    func updateOutput() {
+        switch *_state {
+            .Idle => {
+                out << Bit(0)
+            }
+            .Active => {
+                out << Bit(1)
+            }
+        }
+    }
+}
+
+test "Signal attribute test" {
+    var ctx = simContext()
+    ctx.reset()
+
+    var clk = Clock("clk", 10.ns)
+    clk.start()
+
+    var output = Signal[Bit](Bit(0))
+
+    @unused var comp = TestComponent(&clk, output)
+
+    // Initially idle, output should be 0
+    ctx.run(5.ns)
+    println("Initial state - output: ", *output)
+    ok!(*output == 0)
+
+    // After first clock edge, state should become Active
+    ctx.run(10.ns)
+    println("After first edge - output: ", *output)
+    ok!(*output == 1)
+
+    // After second clock edge, state should become Idle again
+    ctx.run(10.ns)
+    println("After second edge - output: ", *output)
+    ok!(*output == 0)
+}

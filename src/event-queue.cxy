@@ -1,0 +1,175 @@
+module event_queue
+
+import { Event } from "./event.cxy"
+import { Time, ns } from "./time.cxy"
+import { Heap } from "./heap.cxy"
+
+/**
+ * TimedEvent - Internal struct for time-ordered event scheduling
+ * Represents an event that should fire at a specific simulation time
+ */
+struct TimedEvent {
+    time: Time          // When this event should fire
+    delta: u32          // Delta cycle within that time (for ordering)
+    event: Event        // The event to notify when time arrives
+
+    // Comparison operators for min-heap ordering (earliest event first)
+    const func `<`(other: &const TimedEvent): bool {
+        if time < other.time { return true }
+        if time > other.time { return false }
+        return delta < other.delta
+    }
+
+    const func `>`(other: &const TimedEvent): bool {
+        if time > other.time { return true }
+        if time < other.time { return false }
+        return delta > other.delta
+    }
+}
+
+/**
+ * EventQueue - Time-ordered priority queue for simulation events
+ *
+ * Thin wrapper around Heap[TimedEvent] providing a convenient API
+ * for scheduling events by time and delta cycle.
+ *
+ * This is the simulation kernel's scheduler - determines WHEN events fire.
+ */
+pub class EventQueue {
+    _heap = Heap[TimedEvent]()
+
+    func `init`() {}
+
+    /**
+     * Add an event to be fired at a specific time and delta cycle
+     */
+    func push(time: Time, delta: u32, event: Event) {
+        _heap.push(TimedEvent{time: time, delta: delta, event: &&event})
+    }
+
+    /**
+     * Remove and return the earliest scheduled event
+     * Returns null if queue is empty
+     */
+    func pop(): Event {
+        if _heap.empty() {
+            return null
+        }
+        var e = _heap.pop()
+        return &&e.event
+    }
+
+    /**
+     * View the earliest event without removing it
+     * Returns null if queue is empty
+     */
+    func peek(): Optional[&TimedEvent] {
+        return _heap.peek()
+    }
+
+    /**
+     * Check if queue is empty
+     */
+    const func empty(): bool {
+        return _heap.empty()
+    }
+
+    /**
+     * Get number of events in queue
+     */
+    const func size(): u64 {
+        return _heap.size()
+    }
+
+    /**
+     * Remove all events from queue
+     */
+    func clear() {
+        _heap.clear()
+    }
+}
+
+// Tests
+test "EventQueue initialization" {
+    var queue = EventQueue()
+    ok!(queue.empty())
+    ok!(queue.size() == 0)
+}
+
+test "EventQueue push and peek" {
+    var queue = EventQueue()
+    var event = Event()
+
+    queue.push(10.ns, 0, event)
+    ok!(!queue.empty())
+    ok!(queue.size() == 1)
+
+    var peeked = queue.peek()
+    ok!(!!peeked)
+    ok!(peeked&.time == 10.ns)
+    ok!(peeked&.delta == 0)
+}
+
+test "EventQueue pop" {
+    var queue = EventQueue()
+    var event = Event()
+
+    queue.push(10.ns, 0, event)
+    var popped = queue.pop()
+
+    ok!(popped != null)
+    ok!(popped == event)
+    ok!(queue.empty())
+}
+
+test "EventQueue time ordering" {
+    var queue = EventQueue()
+    var e1 = Event()
+    var e2 = Event()
+    var e3 = Event()
+
+    // Push in non-sorted order
+    queue.push(20.ns, 0, e2)
+    queue.push(10.ns, 0, e1)
+    queue.push(30.ns, 0, e3)
+
+    // Should pop in time order
+    var first = queue.pop()
+    ok!(first == e1)
+
+    var second = queue.pop()
+    ok!(second == e2)
+
+    var third = queue.pop()
+    ok!(third == e3)
+
+    ok!(queue.empty())
+}
+
+test "EventQueue delta ordering" {
+    var queue = EventQueue()
+    var e1 = Event()
+    var e2 = Event()
+    var e3 = Event()
+
+    // Same time, different deltas
+    queue.push(10.ns, 2, e3)
+    queue.push(10.ns, 0, e1)
+    queue.push(10.ns, 1, e2)
+
+    // Should pop in delta order
+    var first = queue.pop()
+    ok!(first == e1)
+
+    var second = queue.pop()
+    ok!(second == e2)
+
+    var third = queue.pop()
+    ok!(third == e3)
+}
+
+test "EventQueue pop empty" {
+    var queue = EventQueue()
+    var result = queue.pop()
+    ok!(result == null)
+}
