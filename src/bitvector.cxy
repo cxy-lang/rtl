@@ -656,6 +656,89 @@ pub class BitVector[N] : BitVectorBase {
         return !(this == other)
     }
 
+    // Unsigned comparison operators
+    func `<`(other: &const This): bool {
+        return _toU64() < other._toU64()
+    }
+
+    func `>`(other: &const This): bool {
+        return _toU64() > other._toU64()
+    }
+
+    func `<=`(other: &const This): bool {
+        return _toU64() <= other._toU64()
+    }
+
+    func `>=`(other: &const This): bool {
+        return _toU64() >= other._toU64()
+    }
+
+    // ========================================================================
+    // Extension Operations
+    // ========================================================================
+
+    // Zero extend to width M (M must be >= N)
+    func zeroExtend[M]() {
+        require!(#{M.value} >= #{N.value}, "Target width M must be >= source width N")
+        #const MM = #{M.value}
+        var result = BitVector[#{MM}]()
+
+        // Copy original bits [N-1:0]
+        for i in 0..#{N.value} {
+            result.[i] = this.[i]
+        }
+
+        // Upper bits [M-1:N] remain zero (default)
+        return result
+    }
+
+    // Sign extend to width M (M must be >= N)
+    func signExtend[M]() {
+        require!(#{M.value} >= #{N.value}, "Target width M must be >= source width N")
+        #const MM = #{M.value}
+        var result = BitVector[#{MM}]()
+
+        // Copy original bits [N-1:0]
+        for i in 0..#{N.value} {
+            result.[i] = this.[i]
+        }
+
+        // Replicate sign bit (MSB) into upper bits [M-1:N]
+        var signBit = this.[#{N.value} - 1]
+        for i in #{N.value}..#{MM} {
+            result.[i] = signBit
+        }
+
+        return result
+    }
+
+    // Concatenate with lower BitVector: {this, lower} → new BitVector
+    func concat[M](lower: &BitVector[M]) {
+        #const TotalWidth = N.value + M.value
+        var result = BitVector[#{TotalWidth}]()
+
+        // Copy lower bits [M-1:0]
+        for i in 0..#{M.value} {
+            result.[i] = lower.[i]
+        }
+
+        // Copy this (upper) bits [N+M-1:M]
+        for i in 0..#{N.value} {
+            result.[#{M.value} + i] = this.[i]
+        }
+
+        return result
+    }
+
+    // Signed comparison helpers
+    func lessThanSigned(other: &const This): bool {
+        return _toI64() < other._toI64()
+    }
+
+    func greaterThanSigned(other: &const This): bool {
+        return _toI64() > other._toI64()
+    }
+
     // ========================================================================
     // String Conversion
     // ========================================================================
@@ -1045,4 +1128,152 @@ test "BitVector[N] parse auto-detects hex" {
 test "BitVector[N] parse defaults to binary" {
     var bv = BitVector[4]("1010")
     ok!((bv as u64) == 10)
+}
+
+// ============================================================================
+// Tests for BitVector Comparison Operators
+// ============================================================================
+
+test "BitVector < operator" {
+    var a = BitVector[8](0x10)
+    var b = BitVector[8](0x20)
+    var c = BitVector[8](0x10)
+
+    ok!(a < b)      // 0x10 < 0x20
+    ok!(!(b < a))   // 0x20 not < 0x10
+    ok!(!(a < c))   // 0x10 not < 0x10
+}
+
+test "BitVector > operator" {
+    var a = BitVector[8](0x30)
+    var b = BitVector[8](0x20)
+    var c = BitVector[8](0x30)
+
+    ok!(a > b)      // 0x30 > 0x20
+    ok!(!(b > a))   // 0x20 not > 0x30
+    ok!(!(a > c))   // 0x30 not > 0x30
+}
+
+test "BitVector <= operator" {
+    var a = BitVector[8](0x10)
+    var b = BitVector[8](0x20)
+    var c = BitVector[8](0x10)
+
+    ok!(a <= b)     // 0x10 <= 0x20
+    ok!(a <= c)     // 0x10 <= 0x10
+    ok!(!(b <= a))  // 0x20 not <= 0x10
+}
+
+test "BitVector >= operator" {
+    var a = BitVector[8](0x30)
+    var b = BitVector[8](0x20)
+    var c = BitVector[8](0x30)
+
+    ok!(a >= b)     // 0x30 >= 0x20
+    ok!(a >= c)     // 0x30 >= 0x30
+    ok!(!(b >= a))  // 0x20 not >= 0x30
+}
+
+test "BitVector lessThanSigned with negative" {
+    var a = BitVector[8](0xFF)  // -1 in signed
+    var b = BitVector[8](0x01)  // +1 in signed
+
+    ok!(a.lessThanSigned(&b))   // -1 < +1
+    ok!(!b.lessThanSigned(&a))  // +1 not < -1
+}
+
+test "BitVector greaterThanSigned with negative" {
+    var a = BitVector[8](0x01)  // +1 in signed
+    var b = BitVector[8](0xFF)  // -1 in signed
+
+    ok!(a.greaterThanSigned(&b))   // +1 > -1
+    ok!(!b.greaterThanSigned(&a))  // -1 not > +1
+}
+
+// ============================================================================
+// Tests for BitVector Extension Operations
+// ============================================================================
+
+test "BitVector zeroExtend 8 to 16 bits" {
+    var vec = BitVector[8](0xAB)
+    var extended = vec.zeroExtend[16]()
+
+    ok!((extended as u64) == 0x00AB)
+    ok!(extended.width() == 16)
+}
+
+test "BitVector zeroExtend preserves all bits" {
+    var vec = BitVector[4](0xF)
+    var extended = vec.zeroExtend[8]()
+
+    ok!((extended as u64) == 0x0F)
+    ok!(extended.[0].value == '1')  // All bits set
+    ok!(extended.[3].value == '1')
+    ok!(extended.[4].value == '0')  // Extended bits zero
+    ok!(extended.[7].value == '0')
+}
+
+test "BitVector zeroExtend same width" {
+    var vec = BitVector[8](0xFF)
+    var extended = vec.zeroExtend[8]()
+
+    ok!((extended as u64) == 0xFF)
+}
+
+test "BitVector signExtend positive value" {
+    var vec = BitVector[8](0x7F)  // Positive: MSB=0, binary: 0111_1111
+    var extended = vec.signExtend[16]()
+
+    ok!((extended as u64) == 0x007F)
+    ok!(extended.[6].value == '1')   // Bit 6 is set
+    ok!(extended.[7].value == '0')   // MSB (sign bit) is 0 (positive)
+    ok!(extended.[8].value == '0')   // Sign bit extended as 0
+    ok!(extended.[15].value == '0')  // Upper bits all 0
+}
+
+test "BitVector signExtend negative value" {
+    var vec = BitVector[8](0x80)  // Negative: MSB=1 (-128 in signed)
+    var extended = vec.signExtend[16]()
+
+    ok!((extended as u64) == 0xFF80)
+    ok!(extended.[7].value == '1')   // Original MSB
+    ok!(extended.[8].value == '1')   // Sign bit extended
+    ok!(extended.[15].value == '1')
+}
+
+test "BitVector signExtend all ones" {
+    var vec = BitVector[4](0xF)  // -1 in 4-bit signed
+    var extended = vec.signExtend[8]()
+
+    ok!((extended as u64) == 0xFF)  // Still -1 in 8-bit
+    for i in 0..8 {
+        ok!(extended.[i].value == '1')
+    }
+}
+
+test "BitVector concat two 8-bit values" {
+    var upper = BitVector[8](0xAB)
+    var lower = BitVector[8](0xCD)
+    var result = upper.concat[8](&lower)
+
+    ok!((result as u64) == 0xABCD)
+    ok!(result.width() == 16)
+}
+
+test "BitVector concat different widths" {
+    var upper = BitVector[4](0xA)
+    var lower = BitVector[12](0xBCD)
+    var result = upper.concat[12](&lower)
+
+    ok!((result as u64) == 0xABCD)
+    ok!(result.width() == 16)
+}
+
+test "BitVector concat 4-bit nibbles" {
+    var n1 = BitVector[4](0xF)
+    var n2 = BitVector[4](0x0)
+    var result = n1.concat[4](&n2)
+
+    ok!((result as u64) == 0xF0)
+    ok!(result.width() == 8)
 }
