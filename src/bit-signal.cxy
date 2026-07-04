@@ -86,6 +86,11 @@ pub class BitSignal[N] : BitSignalBase {
         return _storage
     }
 
+    // Dereference operator - syntactic sugar for read()
+    const func `deref`(): BitVector[N] {
+        return _storage
+    }
+
     // Cascade notification to all descendants when we write
     @override
     func downstream(newValue: &const BitVectorBase) {
