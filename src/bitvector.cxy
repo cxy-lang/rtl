@@ -419,6 +419,16 @@ pub class BitVector[N] : BitVectorBase {
         }
     }
 
+    // Constructor 6: Copy constructor (deep copy of bits)
+    func `init`(other: &BitVector[N]) {
+        super()
+        _bits = Vector[Bit]()
+        _offset = 0
+        for i in 0..#{N.value} {
+            _bits.push(other.getBit(i))
+        }
+    }
+
     // Helper: parse binary string (MSB first in string)
     func parseBinaryString(str: string, start_idx: u64): void {
         // Count valid bits
@@ -1148,6 +1158,18 @@ test "BitVector assign copies bits" {
     a.[0] = '0'
     ok!((a as u64) == 0xAA)  // a changed (0xAB - 1 = 0xAA)
     ok!((b as u64) == 0xAB)  // b unchanged
+}
+
+test "BitVector copy constructor" {
+    var a = BitVector[8](0xAB)
+    var b = BitVector[8](&a)  // Copy constructor
+
+    ok!((b as u64) == 0xAB)
+
+    // Change a, verify b is independent
+    a.[0] = '0'
+    ok!((a as u64) == 0xAA)  // a changed
+    ok!((b as u64) == 0xAB)  // b unchanged (independent copy)
 }
 
 test "BitVector assign in array prevents aliasing" {
