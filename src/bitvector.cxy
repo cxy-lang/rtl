@@ -577,6 +577,13 @@ pub class BitVector[N] : BitVectorBase {
         }
     }
 
+    // Copy all bits from another BitVector (preserves this object's identity)
+    func assign(other: &BitVector[N]): void {
+        for i in 0..#{N.value} {
+            setBit(i, other.getBit(i))
+        }
+    }
+
     const func `as`[T](): T {
         require!(T.isInteger, "type {t} is not an integer type", T)
         #if T.isSigned {
@@ -1128,6 +1135,38 @@ test "BitVector[N] parse auto-detects hex" {
 test "BitVector[N] parse defaults to binary" {
     var bv = BitVector[4]("1010")
     ok!((bv as u64) == 10)
+}
+
+test "BitVector assign copies bits" {
+    var a = BitVector[8](0xAB)  // 0b10101011 - bit 0 is '1'
+    var b = BitVector[8](0x00)
+
+    b.assign(&a)
+    ok!((b as u64) == 0xAB)
+
+    // Change a bit 0 from '1' to '0', verify b is independent
+    a.[0] = '0'
+    ok!((a as u64) == 0xAA)  // a changed (0xAB - 1 = 0xAA)
+    ok!((b as u64) == 0xAB)  // b unchanged
+}
+
+test "BitVector assign in array prevents aliasing" {
+    // Initialize each array element with explicit constructor calls
+    var mem = [
+        BitVector[8](0),
+        BitVector[8](0),
+        BitVector[8](0)
+    ]
+
+    var val1 = BitVector[8](0xAA)
+    var val2 = BitVector[8](0xBB)
+
+    mem.[0].assign(&val1)
+    mem.[1].assign(&val2)
+
+    ok!((mem.[0] as u64) == 0xAA)
+    ok!((mem.[1] as u64) == 0xBB)
+    ok!((mem.[2] as u64) == 0x00)
 }
 
 // ============================================================================
