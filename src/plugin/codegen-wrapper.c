@@ -570,20 +570,41 @@ static AstNode *makeSignalInit(MemPool *pool, RtlSignalInfo *signal, const FileL
     // Left side: _signalName
     AstNode *lhs = makePathForName(pool, loc, signal->name);
 
-    // Right side: Signal[Type](defaultValue, "signalName")
-    // Get the original type (before wrapping in Signal)
-    AstNode *innerType = signal->fieldNode->structField.type;
-
-    // Extract the inner type from Signal[T] wrapper
-    // The type has already been transformed to Signal[T], so we need to get T
-    if (nodeIs(innerType, Path) && innerType->path.elements &&
-        innerType->path.elements->pathElement.args) {
-        innerType = innerType->path.elements->pathElement.args;
+    // Get the field type (either Signal[T] or BitSignal[N])
+    AstNode *fieldType = signal->fieldNode->structField.type;
+    
+    // Check if this is BitSignal[N] (not Signal[T])
+    bool isBitSignal = false;
+    AstNode *genericArgs = NULL;
+    
+    if (nodeIs(fieldType, Path) && fieldType->path.elements) {
+        const AstNode *firstElem = fieldType->path.elements;
+        if (firstElem->pathElement.name == rtl_bitsignal) {
+            isBitSignal = true;
+            genericArgs = firstElem->pathElement.args;
+        }
     }
-
-    // Create Signal[T] path
-    AstNode *signalTypePath = makeResolvedPathWithArgs(pool, loc, rtl_signal, flgNone, NULL,
-                                                        deepCloneAstNode(pool, innerType), NULL);
+    
+    AstNode *signalTypePath;
+    if (isBitSignal) {
+        // BitSignal[N] case
+        signalTypePath = makeResolvedPathWithArgs(pool, loc, rtl_bitsignal, flgNone, NULL,
+                                                   deepCloneAstNode(pool, genericArgs), NULL);
+    } else {
+        // Signal[T] case (existing logic)
+        AstNode *innerType = fieldType;
+        
+        // Extract the inner type from Signal[T] wrapper
+        // The type has already been transformed to Signal[T], so we need to get T
+        if (nodeIs(innerType, Path) && innerType->path.elements &&
+            innerType->path.elements->pathElement.args) {
+            innerType = innerType->path.elements->pathElement.args;
+        }
+        
+        // Create Signal[T] path
+        signalTypePath = makeResolvedPathWithArgs(pool, loc, rtl_signal, flgNone, NULL,
+                                                   deepCloneAstNode(pool, innerType), NULL);
+    }
 
     // Clone the default value expression
     AstNode *defaultValue = deepCloneAstNode(pool, signal->defaultValue);
@@ -594,10 +615,10 @@ static AstNode *makeSignalInit(MemPool *pool, RtlSignalInfo *signal, const FileL
     // Link defaultValue -> nameArg to form the argument list
     defaultValue->next = nameArg;
 
-    // Create call: Signal[T](defaultValue, "signalName")
+    // Create call: Signal[T](defaultValue, "signalName") or BitSignal[N](defaultValue, "signalName")
     AstNode *rhs = makeCallExpr(pool, loc, signalTypePath, defaultValue, flgNone, NULL, NULL);
 
-    // Create assignment: _signalName = Signal[T](defaultValue, "signalName")
+    // Create assignment: _signalName = Signal[T](...) or BitSignal[N](...)
     return makeAssignExpr(pool, loc, flgNone, lhs, opAssign, rhs, NULL, NULL);
 }
 

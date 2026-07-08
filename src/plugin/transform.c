@@ -272,7 +272,26 @@ static void transformSignalField(MemPool *pool, RtlSignalInfo *signal, StrPool *
     // Get the current type
     AstNode *currentType = field->structField.type;
 
-    // Create wrapped type: Signal[CurrentType]
+    // Check if this is a BitVector type - if so, transform to BitSignal[N]
+    if (isBitVectorType(currentType)) {
+        // Extract generic args from BitVector[N]
+        AstNode *genericArgs = extractGenericArgs(currentType);
+        
+        // Create BitSignal[N] type (reuse existing helper)
+        AstNode *bitSignalType = makeBitSignalType(pool, &field->loc, genericArgs);
+        
+        // Replace field type with BitSignal[N]
+        field->structField.type = bitSignalType;
+        
+        // Remove default value (will be in constructor)
+        field->structField.value = NULL;
+        
+        // Remove @signal attribute
+        removeAttribute(field, rtl_signal_attr);
+        return;
+    }
+
+    // Default: Regular Signal[T] wrapping for non-BitVector types
     AstNode *wrappedType = makePortTypeWrapper(pool,
                                                 &field->loc,
                                                 rtl_signal,
