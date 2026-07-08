@@ -83,7 +83,7 @@ pub class BitVectorBase {
 
         for i in 0..bits_to_read {
             if getBit(i).value == '1' {
-                result |= (1 << i)
+                result |= (1.u64 << i)
             }
         }
         return result
