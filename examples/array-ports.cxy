@@ -2,7 +2,7 @@
 //
 // Tests the new array port functionality with multiple input/output ports
 
-import { Clock, Signal, simContext, now, ns, BitSignal, Bit, InPort, OutPort } from "../index.cxy"
+import { Clock, Signal, simContext, now, ns, BitSignal, Bit, InPort, OutPort, EventGroup } from "../index.cxy"
 
 import plugin "rtl" as rtl
 
@@ -11,12 +11,22 @@ class ArrayPortTest {
     @input clk: Clock
     @input dataIn: [Bit, 4]
     @output dataOut: [Bit, 4]
+    @signal internal: [Bit, 4] = Bit('0')
 
     @method(clk: "posedge")
     func process() {
         // Simple passthrough - copy all inputs to outputs
         for i in 0..4 {
             dataOut.[i] << *dataIn.[i]
+        }
+    }
+
+    @method(dataIn)
+    func combLogic() {
+        // Combinational logic: invert each input to internal signal
+        for i in 0..4 {
+            var inverted = *dataIn.[i] == Bit('1') ? Bit('0') : Bit('1')
+            internal.[i] << inverted
         }
     }
 }
@@ -42,19 +52,31 @@ func main() {
     )
 
     clk.start()
-    @unused var component = ArrayPortTest(&clk, inputs, outputs)
+    var component = ArrayPortTest(&clk, inputs, outputs)
 
     // Set some input values
     inputs.0 << Bit('1')
     inputs.2 << Bit('1')
 
-    ctx.run(15.ns)
+    // Run for a bit to let combinational logic settle
+    ctx.run(5.ns)
 
-    // Check outputs
-    println("Input 0: ", *inputs.0, " -> Output 0: ", *outputs.0)
-    println("Input 1: ", *inputs.1, " -> Output 1: ", *outputs.1)
-    println("Input 2: ", *inputs.2, " -> Output 2: ", *outputs.2)
-    println("Input 3: ", *inputs.3, " -> Output 3: ", *outputs.3)
+    // Check internal signals (should be inverted inputs)
+    println("After combinational logic:")
+    println("  Input 0: ", *inputs.0, " -> Internal 0: ", *component.internal.[0])
+    println("  Input 1: ", *inputs.1, " -> Internal 1: ", *component.internal.[1])
+    println("  Input 2: ", *inputs.2, " -> Internal 2: ", *component.internal.[2])
+    println("  Input 3: ", *inputs.3, " -> Internal 3: ", *component.internal.[3])
+
+    // Run through clock edge
+    ctx.run(10.ns)
+
+    // Check outputs (should match inputs after clock edge)
+    println("\nAfter clock edge:")
+    println("  Input 0: ", *inputs.0, " -> Output 0: ", *outputs.0)
+    println("  Input 1: ", *inputs.1, " -> Output 1: ", *outputs.1)
+    println("  Input 2: ", *inputs.2, " -> Output 2: ", *outputs.2)
+    println("  Input 3: ", *inputs.3, " -> Output 3: ", *outputs.3)
 
     println("Array ports test complete")
 }

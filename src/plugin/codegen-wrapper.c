@@ -31,10 +31,19 @@ extern cstring rtl_valueChanged;
 extern cstring rtl_change;
 extern cstring rtl_method;
 extern cstring rtl_bitsignal;
+extern cstring rtl_wait;
+extern cstring rtl_waitAny;
+extern cstring rtl_waitAll;
+extern cstring rtl_running;
 
 // Forward declarations (defined in transform.c)
 static void removeAttribute(AstNode *node, cstring attrName);
 static void injectMemberIntoComponent(RtlComponentInfo *comp, AstNode *newMember);
+
+// Forward declarations (defined later in this file)
+static RtlPortInfo *findPortForCodegen(RtlComponentInfo *comp, cstring name);
+static RtlSignalInfo *findSignalForCodegen(RtlComponentInfo *comp, cstring name);
+static AstNode *makeThisMember(MemPool *pool, const FileLoc *loc, cstring fieldName);
 
 // ============================================================================
 // Helper: Create identifier node
@@ -126,6 +135,44 @@ static bool isSignal(RtlComponentInfo *comp, cstring name)
         }
     }
     return false;
+}
+
+// ============================================================================
+// Helper: Find signal by name
+// ============================================================================
+
+static RtlSignalInfo *findSignalForCodegen(RtlComponentInfo *comp, cstring name)
+{
+    for (RtlSignalInfo *signal = comp->signals; signal; signal = signal->next) {
+        if (signal->name == name) {
+            return signal;
+        }
+    }
+    return NULL;
+}
+
+// ============================================================================
+// Helper: Check if a trigger event refers to an array port or signal
+// Returns array dimension expression if array, NULL otherwise
+// ============================================================================
+
+static AstNode *getArrayDimExprForTrigger(RtlComponentInfo *comp, cstring name, bool *outIsSignal)
+{
+    // Check ports
+    RtlPortInfo *port = findPortForCodegen(comp, name);
+    if (port && port->isArray) {
+        if (outIsSignal) *outIsSignal = false;
+        return port->arrayDimExpr;
+    }
+
+    // Check signals
+    RtlSignalInfo *signal = findSignalForCodegen(comp, name);
+    if (signal && signal->isArray) {
+        if (outIsSignal) *outIsSignal = true;
+        return signal->arrayDimExpr;
+    }
+
+    return NULL;
 }
 
 // ============================================================================
@@ -273,55 +320,155 @@ AstNode *rtlGenerateWrapper(MemPool *pool,
     if (method->trigger.mode == rtlTriggerSingle) {
         // Single event mode
         // Generate: var event = port.event() or port.event; while { event.wait(); methodName(); }
+        // Special case: if port/signal is an array, generate EventGroup with comptime for loop
 
         RtlTriggerEvent *event = method->trigger.events;
         if (!event) {
             return NULL;  // Should never happen - validation checked this
         }
 
-        // Generate event variable declaration
-        cstring eventVarName = makeString(strings, "event");
+        // Check if this trigger refers to an array port/signal
+        bool isArraySignal = false;
+        AstNode *arrayDimExpr = getArrayDimExprForTrigger(comp, event->portName, &isArraySignal);
 
-        // Check if this is a signal or a port
-        bool isSignalEvent = isSignal(comp, event->portName);
+        if (arrayDimExpr) {
+            // Array port/signal - generate EventGroup with comptime for loop
+            // Generate:
+            //   var eg = EventGroup()
+            //   #for (const i: 0..N) {
+            //       eg.add(this.portName.[#{i}].eventName())
+            //   }
+            //   while { eg.wait(); methodName(); }
 
-        // For signals: all events are fields (valueChanged, etc.)
-        // For ports: valueChanged/change are methods, posedge/negedge are fields
-        bool needsMethodCall = !isSignalEvent &&
-                               (event->eventName == rtl_valueChanged ||
-                                event->eventName == rtl_change);
+            cstring egVarName = makeString(strings, "eg");
 
-        // Build path: portName.eventName
-        AstNode *eventElem = makeResolvedPathElement(pool, loc, event->eventName, flgNone, NULL, NULL, NULL);
-        AstNode *portElem = makeResolvedPathElement(pool, loc, event->portName, flgNone, NULL, eventElem, NULL);
-        AstNode *path = makePathWithElements(pool, loc, flgNone, portElem, NULL);
+            // 1. Create EventGroup constructor: var eg = EventGroup()
+            AstNode *egTypePath = makePathForName(pool, loc, rtl_EventGroup);
+            AstNode *egConstructor = makeCallExpr(pool, loc, egTypePath, NULL, flgNone, NULL, NULL);
+            AstNode *egDecl = makeVarDecl(pool, loc, flgNone, egVarName, NULL, egConstructor, NULL, NULL);
 
-        AstNode *eventAccess;
-        if (needsMethodCall) {
-            // Call the method: portName.eventName()
-            eventAccess = makeCall(pool, loc, path);
+            // 2. Create comptime for loop: #for (const i: 0..N) { eg.add(...) }
+
+            // Loop variable: const i
+            AstNode *loopVar = makeVarDecl(pool, loc, flgConst, makeString(strings, "i"),
+                                            NULL, NULL, NULL, NULL);
+
+            // Range: 0..N
+            AstNode *zeroLit = makeIntegerLiteral(pool, loc, 0, NULL, NULL);
+            AstNode *dimExpr = deepCloneAstNode(pool, arrayDimExpr);
+            AstNode *rangeExpr = makeAstNode(
+                pool,
+                loc,
+                &(AstNode){.tag = astRangeExpr,
+                           .flags = flgNone,
+                           .rangeExpr = {.start = zeroLit,
+                                         .end = dimExpr,
+                                         .step = NULL}});
+
+            // Loop body: eg.add(this.portName.[#{i}].eventName())
+            
+            // this.portName
+            AstNode *thisFieldPath = makeThisMember(pool, loc, event->portName);
+            
+            // this.portName.[#{i}]
+            AstNode *iPath = makePathForName(pool, loc, makeString(strings, "i"));
+            iPath->flags |= flgComptime;
+            AstNode *arrayAccess = makeIndexExpr(pool, loc, flgNone, thisFieldPath, iPath, NULL, NULL);
+
+            // arrayAccess.eventName or arrayAccess.eventName()
+            bool isSignalEvent = isArraySignal;
+            bool needsMethodCall = !isSignalEvent &&
+                                   (event->eventName == rtl_valueChanged ||
+                                    event->eventName == rtl_change);
+
+            // Create member access: arrayAccess.eventName
+            AstNode *eventIdent = makeIdentifier(pool, loc, event->eventName, 0, NULL, NULL);
+            AstNode *memberAccess = makeMemberExpr(pool, loc, flgNone, arrayAccess, eventIdent, NULL, NULL);
+
+            AstNode *eventExpr;
+            if (needsMethodCall) {
+                eventExpr = makeCall(pool, loc, memberAccess);
+            } else {
+                eventExpr = memberAccess;
+            }
+
+            // eg.addEvent(eventExpr)
+            AstNode *egPath = makePathForName(pool, loc, egVarName);
+            AstNode *addEventIdent = makeIdentifier(pool, loc, makeString(strings, "addEvent"), 0, NULL, NULL);
+            AstNode *addEventPath = makeMemberExpr(pool, loc, flgNone, egPath, addEventIdent, NULL, NULL);
+            AstNode *addCall = makeCallExpr(pool, loc, addEventPath, eventExpr, flgNone, NULL, NULL);
+            AstNode *addStmt = makeExprStmt(pool, loc, flgNone, addCall, NULL, NULL);
+
+            // Wrap in block
+            AstNode *loopBody = makeBlockStmt(pool, loc, addStmt, NULL, NULL);
+
+            // Create comptime for
+            AstNode *comptimeFor = makeForStmt(pool, loc, flgComptime, loopVar, rangeExpr, NULL, loopBody, NULL);
+
+            // Link: egDecl -> comptimeFor
+            egDecl->next = comptimeFor;
+            preLoopStmts = egDecl;
+
+            // Generate infinite loop condition
+            conditionStmt = makeBoolLiteral(pool, loc, true, NULL, NULL);
+
+            // Generate loop body: eg.waitAny() + method call
+            AstNode *waitAnyIdent = makeIdentifier(pool, loc, rtl_waitAny, 0, NULL, NULL);
+            AstNode *egPathForWait = makePathForName(pool, loc, egVarName);
+            AstNode *waitAnyMember = makeMemberExpr(pool, loc, flgNone, egPathForWait, waitAnyIdent, NULL, NULL);
+            AstNode *waitCall = makeCall(pool, loc, waitAnyMember);
+            AstNode *waitStmt = makeExprStmt(pool, loc, flgNone, waitCall, NULL, NULL);
+
+            AstNode *callStmt = makeMethodCallStmt(pool, loc, method->name);
+            waitStmt->next = callStmt;
+            loopBodyStmts = waitStmt;
+
         } else {
-            // Direct field access: portName.eventName
-            eventAccess = path;
+            // Non-array port/signal - use existing logic
+            // Generate event variable declaration
+            cstring eventVarName = makeString(strings, "event");
+
+            // Check if this is a signal or a port
+            bool isSignalEvent = isSignal(comp, event->portName);
+
+            // For signals: all events are fields (valueChanged, etc.)
+            // For ports: valueChanged/change are methods, posedge/negedge are fields
+            bool needsMethodCall = !isSignalEvent &&
+                                   (event->eventName == rtl_valueChanged ||
+                                    event->eventName == rtl_change);
+
+            // Build path: portName.eventName
+            AstNode *eventElem = makeResolvedPathElement(pool, loc, event->eventName, flgNone, NULL, NULL, NULL);
+            AstNode *portElem = makeResolvedPathElement(pool, loc, event->portName, flgNone, NULL, eventElem, NULL);
+            AstNode *path = makePathWithElements(pool, loc, flgNone, portElem, NULL);
+
+            AstNode *eventAccess;
+            if (needsMethodCall) {
+                // Call the method: portName.eventName()
+                eventAccess = makeCall(pool, loc, path);
+            } else {
+                // Direct field access: portName.eventName
+                eventAccess = path;
+            }
+
+            // Create variable declaration: var event = port.event() or port.event
+            preLoopStmts = makeVarDecl(pool, loc, flgNone, eventVarName, NULL, eventAccess, NULL, NULL);
+
+            // Generate infinite loop condition (true literal)
+            conditionStmt = makeBoolLiteral(pool, loc, true, NULL, NULL);
+
+            // Generate loop body: event.wait() + method call
+            // Build path: event.wait
+            AstNode *waitElem = makeResolvedPathElement(pool, loc, rtl_wait, flgNone, NULL, NULL, NULL);
+            AstNode *eventVarElem = makeResolvedPathElement(pool, loc, eventVarName, flgNone, NULL, waitElem, NULL);
+            AstNode *waitPath = makePathWithElements(pool, loc, flgNone, eventVarElem, NULL);
+            AstNode *waitCall = makeCall(pool, loc, waitPath);
+            AstNode *waitStmt = makeExprStmt(pool, loc, flgNone, waitCall, NULL, NULL);
+
+            AstNode *callStmt = makeMethodCallStmt(pool, loc, method->name);
+            waitStmt->next = callStmt;
+            loopBodyStmts = waitStmt;
         }
-
-        // Create variable declaration: var event = port.event() or port.event
-        preLoopStmts = makeVarDecl(pool, loc, flgNone, eventVarName, NULL, eventAccess, NULL, NULL);
-
-        // Generate infinite loop condition (true literal)
-        conditionStmt = makeBoolLiteral(pool, loc, true, NULL, NULL);
-
-        // Generate loop body: event.wait() + method call
-        // Build path: event.wait
-        AstNode *waitElem = makeResolvedPathElement(pool, loc, rtl_wait, flgNone, NULL, NULL, NULL);
-        AstNode *eventVarElem = makeResolvedPathElement(pool, loc, eventVarName, flgNone, NULL, waitElem, NULL);
-        AstNode *waitPath = makePathWithElements(pool, loc, flgNone, eventVarElem, NULL);
-        AstNode *waitCall = makeCall(pool, loc, waitPath);
-        AstNode *waitStmt = makeExprStmt(pool, loc, flgNone, waitCall, NULL, NULL);
-
-        AstNode *callStmt = makeMethodCallStmt(pool, loc, method->name);
-        waitStmt->next = callStmt;
-        loopBodyStmts = waitStmt;
 
     } else {
         // Multiple event mode (ANY or ALL)
@@ -683,8 +830,98 @@ static AstNode *makeAsyncLaunch(MemPool *pool,
 
 // Helper: Create signal initialization statement
 // _signalName = Signal[Type](defaultValue, "signalName")
-static AstNode *makeSignalInit(MemPool *pool, RtlSignalInfo *signal, const FileLoc *loc)
+static AstNode *makeSignalInit(MemPool *pool, StrPool *strings, RtlSignalInfo *signal, const FileLoc *loc)
 {
+    // Handle array signals: generate comptime for loop
+    if (signal->isArray) {
+        // Generate: #for (const i: 0..N) { this.signal.[#{i}] = Signal[T](defaultValue, "signal") }
+
+        // 1. Create loop variable: const i
+        AstNode *loopVar = makeVarDecl(pool, loc, flgConst, makeString(strings, "i"),
+                                        NULL, NULL, NULL, NULL);
+
+        // 2. Create range: 0..N
+        AstNode *zeroLit = makeIntegerLiteral(pool, loc, 0, NULL, NULL);
+        AstNode *dimExpr = deepCloneAstNode(pool, signal->arrayDimExpr);
+        AstNode *rangeExpr = makeAstNode(
+            pool,
+            loc,
+            &(AstNode){.tag = astRangeExpr,
+                       .flags = flgNone,
+                       .rangeExpr = {.start = zeroLit,
+                                     .end = dimExpr,
+                                     .step = NULL}});
+
+        // 3. Create loop body assignment: this.signal.[#{i}] = Signal[T](defaultValue, "signal")
+
+        // Left side: this.signal.[#{i}]
+        AstNode *fieldAccess = makeThisMember(pool, loc, signal->name);
+        AstNode *iPath = makePathForName(pool, loc, makeString(strings, "i"));
+        iPath->flags |= flgComptime;
+        AstNode *lhs = makeIndexExpr(pool, loc, flgNone, fieldAccess, iPath, NULL, NULL);
+
+        // Right side: get element type and create Signal/BitSignal constructor
+        // Field type is [Signal[T], N] or [BitSignal[N], N]
+        // We need to extract Signal[T] or BitSignal[N]
+        AstNode *fieldType = signal->fieldNode->structField.type;
+        AstNode *elementType = NULL;
+        
+        if (nodeIs(fieldType, ArrayType)) {
+            elementType = fieldType->arrayType.elementType;
+        } else {
+            // Shouldn't happen, but fallback
+            elementType = fieldType;
+        }
+
+        // Check if element is BitSignal[N] or Signal[T]
+        bool isBitSignal = false;
+        AstNode *genericArgs = NULL;
+        
+        if (nodeIs(elementType, Path) && elementType->path.elements) {
+            const AstNode *firstElem = elementType->path.elements;
+            if (firstElem->pathElement.name == rtl_bitsignal) {
+                isBitSignal = true;
+                genericArgs = firstElem->pathElement.args;
+            } else if (firstElem->pathElement.name == rtl_signal) {
+                genericArgs = firstElem->pathElement.args;
+            }
+        }
+
+        AstNode *signalTypePath;
+        if (isBitSignal) {
+            signalTypePath = makeResolvedPathWithArgs(pool, loc, rtl_bitsignal, flgNone, NULL,
+                                                       deepCloneAstNode(pool, genericArgs), NULL);
+        } else {
+            signalTypePath = makeResolvedPathWithArgs(pool, loc, rtl_signal, flgNone, NULL,
+                                                       deepCloneAstNode(pool, genericArgs), NULL);
+        }
+
+        // Clone the default value expression
+        AstNode *defaultValue = deepCloneAstNode(pool, signal->defaultValue);
+
+        // Create string literal for signal name
+        AstNode *nameArg = makeStringLiteral(pool, loc, signal->name, NULL, NULL);
+
+        // Link defaultValue -> nameArg
+        defaultValue->next = nameArg;
+
+        // Create call: Signal[T](defaultValue, "signal") or BitSignal[N](defaultValue, "signal")
+        AstNode *rhs = makeCallExpr(pool, loc, signalTypePath, defaultValue, flgNone, NULL, NULL);
+
+        // Create assignment statement
+        AstNode *assignExpr = makeAssignExpr(pool, loc, flgNone, lhs, opAssign, rhs, NULL, NULL);
+        AstNode *assignStmt = makeExprStmt(pool, loc, flgNone, assignExpr, NULL, NULL);
+
+        // Wrap in block statement
+        AstNode *blockStmt = makeBlockStmt(pool, loc, assignStmt, NULL, NULL);
+
+        // 4. Create comptime for statement
+        AstNode *comptimeFor = makeForStmt(pool, loc, flgComptime, loopVar, rangeExpr, NULL, blockStmt, NULL);
+
+        return comptimeFor;
+    }
+
+    // Single signal (non-array)
     // Left side: _signalName
     AstNode *lhs = makePathForName(pool, loc, signal->name);
 
@@ -773,18 +1010,26 @@ void rtlGenerateConstructor(MemPool *pool,
 
     // Signal initializations (before port bindings)
     for (RtlSignalInfo *signal = comp->signals; signal; signal = signal->next) {
-        AstNode *init = makeSignalInit(pool, signal, loc);
+        AstNode *init = makeSignalInit(pool, strings, signal, loc);
         if (!init) continue;
 
-        // Wrap in expression statement
-        AstNode *exprStmt = makeExprStmt(pool, loc, flgNone, init, NULL, NULL);
+        // Check if init is already a statement (e.g., ForStmt for array signals)
+        // or an expression that needs wrapping (e.g., AssignExpr for regular signals)
+        AstNode *stmt;
+        if (init->tag == astForStmt || init->tag == astExprStmt) {
+            // Already a statement, use as-is
+            stmt = init;
+        } else {
+            // Expression, wrap in ExprStmt
+            stmt = makeExprStmt(pool, loc, flgNone, init, NULL, NULL);
+        }
 
         if (!body) {
-            body = exprStmt;
-            lastStmt = exprStmt;
+            body = stmt;
+            lastStmt = stmt;
         } else {
-            lastStmt->next = exprStmt;
-            lastStmt = exprStmt;
+            lastStmt->next = stmt;
+            lastStmt = stmt;
         }
     }
 
