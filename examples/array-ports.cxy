@@ -1,0 +1,60 @@
+// Array Ports Test
+//
+// Tests the new array port functionality with multiple input/output ports
+
+import { Clock, Signal, simContext, now, ns, BitSignal, Bit, InPort, OutPort } from "../index.cxy"
+
+import plugin "rtl" as rtl
+
+@rtl::component
+class ArrayPortTest {
+    @input clk: Clock
+    @input dataIn: [Bit, 4]
+    @output dataOut: [Bit, 4]
+
+    @method(clk: "posedge")
+    func process() {
+        // Simple passthrough - copy all inputs to outputs
+        for i in 0..4 {
+            dataOut.[i] << *dataIn.[i]
+        }
+    }
+}
+
+func main() {
+    var ctx = simContext()
+    var clk = Clock("clk", 10.ns)
+
+    // Create array of input signals
+    var inputs = (
+        Signal[Bit](Bit('0')),
+        Signal[Bit](Bit('0')),
+        Signal[Bit](Bit('0')),
+        Signal[Bit](Bit('0'))
+    )
+
+    // Create array of output signals
+    var outputs = (
+        Signal[Bit](Bit('0')),
+        Signal[Bit](Bit('0')),
+        Signal[Bit](Bit('0')),
+        Signal[Bit](Bit('0'))
+    )
+
+    clk.start()
+    @unused var component = ArrayPortTest(&clk, inputs, outputs)
+
+    // Set some input values
+    inputs.0 << Bit('1')
+    inputs.2 << Bit('1')
+
+    ctx.run(15.ns)
+
+    // Check outputs
+    println("Input 0: ", *inputs.0, " -> Output 0: ", *outputs.0)
+    println("Input 1: ", *inputs.1, " -> Output 1: ", *outputs.1)
+    println("Input 2: ", *inputs.2, " -> Output 2: ", *outputs.2)
+    println("Input 3: ", *inputs.3, " -> Output 3: ", *outputs.3)
+
+    println("Array ports test complete")
+}

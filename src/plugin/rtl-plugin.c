@@ -68,6 +68,9 @@ cstring rtl_and;
 // Interned type names for EventGroup
 cstring rtl_EventGroup;
 
+// Interned macro names
+cstring rtl_tupleof;
+
 // ============================================================================
 // Action: rtl::component!(struct_def)
 //
@@ -339,6 +342,9 @@ bool pluginInit(CxyPluginContext *ctx, const FileLoc *loc)
 
     // Intern EventGroup type name
     rtl_EventGroup = makeString(ctx->strings, "EventGroup");
+
+    // Intern macro names
+    rtl_tupleof = makeString(ctx->strings, "tupleof");
 
     // Allocate plugin state using CXY's memory pool
     RtlPluginState *state = callocFromMemPool(ctx->pool, 1, sizeof(RtlPluginState));

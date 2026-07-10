@@ -465,6 +465,39 @@ static AstNode *makePortParameter(MemPool *pool,
 {
     AstNode *paramType;
 
+    // Handle array ports: generate tupleof!(Signal[T], N) macro call
+    if (port->isArray) {
+        // Get element signal type (Signal[T] or BitSignal[W])
+        AstNode *elementSignalType;
+        if (port->paramType && isBitSignalType(port->paramType)) {
+            // BitSignal[W]
+            elementSignalType = deepCloneAstNode(pool, port->paramType);
+        } else {
+            // Signal[T]
+            AstNode *innerType = deepCloneAstNode(pool, port->paramType);
+            elementSignalType = makeResolvedPathWithArgs(pool, loc, rtl_signal, flgNone, NULL, innerType, NULL);
+            elementSignalType->path.isType = true;
+        }
+
+        // Set required flags for type argument in tupleof! macro
+        elementSignalType->flags |= flgTypeAst | flgTypeinfo;
+
+        // Clone dimension expression
+        AstNode *dimExpr = deepCloneAstNode(pool, port->arrayDimExpr);
+
+        // Build argument list: (elementSignalType, dimExpr)
+        elementSignalType->next = dimExpr;
+
+        // Create macro identifier: tupleof
+        AstNode *macroIdent = makeIdentifier(pool, loc, rtl_tupleof, 0, NULL, NULL);
+
+        // Create macro call: tupleof!(Signal[T], N)
+        // Must have TypeAst and Comptime flags like in working examples
+        paramType = makeMacroCallAstNode(pool, loc, flgTypeAst | flgComptime, macroIdent, elementSignalType, NULL);
+
+        return makeFunctionParam(pool, loc, port->name, paramType, NULL, flgNone, NULL);
+    }
+
     if (port->isClock) {
         // Clock ports: use field type directly (&Clock)
         paramType = deepCloneAstNode(pool, port->fieldNode->structField.type);
@@ -484,11 +517,96 @@ static AstNode *makePortParameter(MemPool *pool,
 // Helper: Create port binding statement
 // Clock: this.clk = clk
 // InPort/InBitPort: this.port = InPort[T](&&port) or InBitPort[N](&&port)
-// OutPort/OutBitPort: this.port = OutPort[T](&&port) or OutBitPort[N](&&port)
+// Array ports: #for loop with comptime indexing
 static AstNode *makePortBinding(MemPool *pool,
+                                 StrPool *strings,
                                  RtlPortInfo *port,
                                  const FileLoc *loc)
 {
+    // Handle array ports: generate comptime for loop
+    if (port->isArray) {
+        // Generate: #for (const i: 0..N) { this.port.[#{i}] = InPort[T](port.#{i}) }
+
+        // 1. Create loop variable: const i
+        AstNode *loopVar = makeVarDecl(pool, loc, flgConst, makeString(strings, "i"),
+                                        NULL, NULL, NULL, NULL);
+
+        // 2. Create range: 0..N
+        AstNode *zeroLit = makeIntegerLiteral(pool, loc, 0, NULL, NULL);
+        AstNode *dimExpr = deepCloneAstNode(pool, port->arrayDimExpr);
+        AstNode *rangeExpr = makeAstNode(
+            pool,
+            loc,
+            &(AstNode){.tag = astRangeExpr,
+                       .flags = flgNone,
+                       .rangeExpr = {.start = zeroLit,
+                                     .end = dimExpr,
+                                     .step = NULL}});
+
+        // 3. Create loop body assignment: this.port.[#{i}] = InPort[T](port.#{i})
+
+        // Left side: this.port.[#{i}]
+        AstNode *fieldAccess = makeThisMember(pool, loc, port->name);
+        AstNode *iPath = makePathForName(pool, loc, makeString(strings, "i"));
+        iPath->flags |= flgComptime;
+        AstNode *lhs = makeIndexExpr(pool, loc, flgNone, fieldAccess, iPath, NULL, NULL);
+
+        // Right side: InPort[T](&&port.#{i})
+        // For tuple member access with comptime index
+        // Target must be a Path, not just an Identifier
+        AstNode *portPath = makePathForName(pool, loc, port->name);
+        
+        // Create comptime path for i
+        AstNode *iPathRhs = makePathForName(pool, loc, makeString(strings, "i"));
+        iPathRhs->flags |= flgComptime;
+        
+        // Create member access: port.#{i}
+        AstNode *tupleAccess = makeMemberExpr(pool, loc, flgNone, portPath, iPathRhs, NULL, NULL);
+
+        // Get wrapper name
+        cstring wrapperName;
+        bool isBitSignal = port->paramType && isBitSignalType(port->paramType);
+        switch (port->direction) {
+            case rtlPortIn:
+                wrapperName = isBitSignal ? rtl_inbitport : rtl_inport;
+                break;
+            case rtlPortOut:
+                wrapperName = isBitSignal ? rtl_outbitport : rtl_outport;
+                break;
+            case rtlPortInOut:
+                wrapperName = isBitSignal ? rtl_inoutbitport : rtl_inoutport;
+                break;
+            default:
+                return NULL;
+        }
+
+        // Get wrapper type args
+        AstNode *wrapperTypeArgs;
+        if (port->wrapperArgs != NULL) {
+            wrapperTypeArgs = deepCloneAstNode(pool, port->wrapperArgs);
+        } else {
+            wrapperTypeArgs = deepCloneAstNode(pool, port->paramType);
+        }
+
+        // Create wrapper path: InPort[T]
+        AstNode *wrapperPath = makeResolvedPathWithArgs(pool, loc, wrapperName, flgNone, NULL, wrapperTypeArgs, NULL);
+
+        // Create call: InPort[T](port.#{i})
+        AstNode *rhs = makeCallExpr(pool, loc, wrapperPath, tupleAccess, flgNone, NULL, NULL);
+
+        // Create assignment statement
+        AstNode *assignExpr = makeAssignExpr(pool, loc, flgNone, lhs, opAssign, rhs, NULL, NULL);
+        AstNode *assignStmt = makeExprStmt(pool, loc, flgNone, assignExpr, NULL, NULL);
+
+        // Wrap in block statement
+        AstNode *blockStmt = makeBlockStmt(pool, loc, assignStmt, NULL, NULL);
+
+        // 4. Create comptime for statement
+        AstNode *comptimeFor = makeForStmt(pool, loc, flgComptime, loopVar, rangeExpr, NULL, blockStmt, NULL);
+
+        return comptimeFor;
+    }
+
     AstNode *lhs = makeThisMember(pool, loc, port->name);
     AstNode *rhs;
 
@@ -672,18 +790,26 @@ void rtlGenerateConstructor(MemPool *pool,
 
     // Port bindings
     for (RtlPortInfo *port = comp->ports; port; port = port->next) {
-        AstNode *binding = makePortBinding(pool, port, loc);
+        AstNode *binding = makePortBinding(pool, strings, port, loc);
         if (!binding) continue;
 
-        // Wrap in expression statement
-        AstNode *exprStmt = makeExprStmt(pool, loc, flgNone, binding, NULL, NULL);
+        // Check if binding is already a statement (e.g., ForStmt for array ports)
+        // or an expression that needs wrapping (e.g., AssignExpr for regular ports)
+        AstNode *stmt;
+        if (binding->tag == astForStmt || binding->tag == astExprStmt) {
+            // Already a statement, use as-is
+            stmt = binding;
+        } else {
+            // Expression, wrap in ExprStmt
+            stmt = makeExprStmt(pool, loc, flgNone, binding, NULL, NULL);
+        }
 
         if (!body) {
-            body = exprStmt;
-            lastStmt = exprStmt;
+            body = stmt;
+            lastStmt = stmt;
         } else {
-            lastStmt->next = exprStmt;
-            lastStmt = exprStmt;
+            lastStmt->next = stmt;
+            lastStmt = stmt;
         }
     }
 

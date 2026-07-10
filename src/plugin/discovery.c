@@ -50,6 +50,33 @@ static bool isClockType(const AstNode *typeNode)
     return false;
 }
 
+// Check if a type is an array type [T, N]
+static bool isArrayTypeNode(const AstNode *typeNode)
+{
+    return typeNode && nodeIs(typeNode, ArrayType);
+}
+
+// Extract array element type and dimension expression from [T, N]
+// Returns true if successful, false otherwise
+static bool extractArrayInfo(const AstNode *arrayType,
+                              AstNode **elementType,
+                              AstNode **dimExpr)
+{
+    if (!isArrayTypeNode(arrayType)) {
+        return false;
+    }
+
+    *elementType = arrayType->arrayType.elementType;
+    *dimExpr = arrayType->arrayType.dim;
+
+    // Basic validation: must have element type and dimension
+    if (!*elementType || !*dimExpr) {
+        return false;
+    }
+
+    return true;
+}
+
 static RtlPortInfo *discoverPort(MemPool *pool,
                                   AstNode *field,
                                   RtlPortDirection direction)
@@ -59,13 +86,31 @@ static RtlPortInfo *discoverPort(MemPool *pool,
 
     port->name = field->structField.name;
     port->direction = direction;
-    port->isClock = isClockType(field->structField.type);
     port->fieldNode = field;  // Store mutable field node
 
-    // Store original parameter type (Signal[T] or Clock) before transformation
-    port->paramType = field->structField.type;
-    port->wrapperArgs = NULL;  // Will be set during transformation for BitVector ports
+    // Check if this is an array type
+    AstNode *fieldType = field->structField.type;
+    if (isArrayTypeNode(fieldType)) {
+        port->isArray = true;
+        extractArrayInfo(fieldType, &port->arrayElementType, &port->arrayDimExpr);
 
+        // Check if element type is Clock
+        port->isClock = isClockType(port->arrayElementType);
+
+        // Store element type as paramType (will be transformed to tuple of signals later)
+        port->paramType = port->arrayElementType;
+    } else {
+        // Single port (not array)
+        port->isArray = false;
+        port->arrayDimExpr = NULL;
+        port->arrayElementType = NULL;
+        port->isClock = isClockType(fieldType);
+
+        // Store original parameter type (Signal[T] or Clock) before transformation
+        port->paramType = fieldType;
+    }
+
+    port->wrapperArgs = NULL;  // Will be set during transformation for BitVector ports
     port->next = NULL;
     return port;
 }
@@ -82,6 +127,18 @@ static RtlSignalInfo *discoverSignal(MemPool *pool, AstNode *field)
     signal->name = field->structField.name;
     signal->fieldNode = field;  // Store mutable field node
     signal->defaultValue = field->structField.value;  // Extract default value
+
+    // Check if this is an array type
+    AstNode *fieldType = field->structField.type;
+    if (isArrayTypeNode(fieldType)) {
+        signal->isArray = true;
+        extractArrayInfo(fieldType, &signal->arrayElementType, &signal->arrayDimExpr);
+    } else {
+        signal->isArray = false;
+        signal->arrayDimExpr = NULL;
+        signal->arrayElementType = NULL;
+    }
+
     signal->next = NULL;
     return signal;
 }

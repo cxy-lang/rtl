@@ -65,6 +65,9 @@ extern cstring rtl_and;
 // Interned type names for EventGroup
 extern cstring rtl_EventGroup;
 
+// Interned macro names
+extern cstring rtl_tupleof;
+
 // ============================================================================
 // Port direction
 // ============================================================================
@@ -87,6 +90,9 @@ typedef struct RtlPortInfo {
     AstNode           *paramType;     // Constructor parameter type (for non-clock: Signal[T] or BitSignal[N])
     AstNode           *wrapperArgs;   // Generic args for port wrapper (e.g., [N] for InBitPort[N])
     bool               isClock;       // True if type is &Clock
+    bool               isArray;       // True if port is array type [T, N]
+    AstNode           *arrayDimExpr;  // Array dimension expression (N from [T, N]), not evaluated
+    AstNode           *arrayElementType; // Element type (T from [T, N])
     struct RtlPortInfo *next;
 } RtlPortInfo;
 
@@ -98,6 +104,9 @@ typedef struct RtlSignalInfo {
     const char         *name;         // Field name (interned)
     AstNode            *fieldNode;    // Mutable field AST node (structField)
     AstNode            *defaultValue; // Default value expression (required)
+    bool                isArray;      // True if signal is array type [T, N]
+    AstNode            *arrayDimExpr; // Array dimension expression (N from [T, N]), not evaluated
+    AstNode            *arrayElementType; // Element type (T from [T, N])
     struct RtlSignalInfo *next;
 } RtlSignalInfo;
 

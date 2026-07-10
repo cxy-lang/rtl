@@ -31,6 +31,10 @@ builds:
     entry: examples/bitvector-test.cxy
     output: bitvector-example
 
+  array-ports-example:
+    entry: examples/array-ports.cxy
+    output: array-ports
+
   rtl-plugin:
     entry: src/plugin/rtl-plugin.c
     output: rtl

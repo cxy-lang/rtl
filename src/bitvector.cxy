@@ -358,7 +358,7 @@ pub class BitVector[N] : BitVectorBase {
         super()
         _bits = Vector[Bit]()
         _offset = 0
-        for i in 0..#{N.value} {
+        for i in 0..#{N} {
             _bits.push(Bit('0'))
         }
     }
@@ -376,7 +376,7 @@ pub class BitVector[N] : BitVectorBase {
         super()
         _bits = Vector[Bit]()
         _offset = 0
-        for i in 0..#{N.value} {
+        for i in 0..#{N} {
             var bit_val = (value >> i) & 1
             _bits.push(Bit(bit_val as u32))
         }
@@ -394,7 +394,7 @@ pub class BitVector[N] : BitVectorBase {
         _offset = 0
 
         // Allocate storage
-        for i in 0..#{N.value} {
+        for i in 0..#{N} {
             _bits.push(Bit('0'))
         }
 
@@ -424,7 +424,7 @@ pub class BitVector[N] : BitVectorBase {
         super()
         _bits = Vector[Bit]()
         _offset = 0
-        for i in 0..#{N.value} {
+        for i in 0..#{N} {
             _bits.push(other.getBit(i))
         }
     }
@@ -441,10 +441,10 @@ pub class BitVector[N] : BitVectorBase {
             }
         }
 
-        assert!(bit_count == #{N.value}, "Binary string length doesn't match vector width")
+        assert!(bit_count == #{N}, "Binary string length doesn't match vector width")
 
         // Parse from MSB to LSB (string is MSB first, storage is LSB first)
-        var bit_idx: i64 = #{N.value} as i64 - 1
+        var bit_idx: i64 = #{N} as i64 - 1
         for i in start_idx..size {
             var ch = str.[i]
             if ch == '_' || ch == ' ' {
@@ -475,7 +475,7 @@ pub class BitVector[N] : BitVectorBase {
             }
         }
 
-        var expected_nibbles = (#{N.value} + 3) / 4
+        var expected_nibbles = (#{N} + 3) / 4
         assert!(nibble_count == expected_nibbles, "Hex string length doesn't match vector width")
 
         // Parse nibbles from MSB to LSB
@@ -492,7 +492,7 @@ pub class BitVector[N] : BitVectorBase {
             if nibble_val >= 0 {
                 // Valid hex digit 0-15
                 for bit in 0..4 {
-                    if bit_base + bit < #{N.value} {
+                    if bit_base + bit < #{N} {
                         var bit_val = (nibble_val >> bit) & 1
                         _bits.[(bit_base + bit) as i32] = Bit(bit_val as u32)
                     }
@@ -500,14 +500,14 @@ pub class BitVector[N] : BitVectorBase {
             } else if nibble_val == -1 {
                 // X nibble
                 for bit in 0..4 {
-                    if bit_base + bit < #{N.value} {
+                    if bit_base + bit < #{N} {
                         _bits.[(bit_base + bit) as i32] = Bit('X')
                     }
                 }
             } else {
                 // Z nibble
                 for bit in 0..4 {
-                    if bit_base + bit < #{N.value} {
+                    if bit_base + bit < #{N} {
                         _bits.[(bit_base + bit) as i32] = Bit('Z')
                     }
                 }
@@ -544,7 +544,7 @@ pub class BitVector[N] : BitVectorBase {
 
     @override
     const func width(): u64 {
-        return #{N.value}
+        return #{N}
     }
 
     // ========================================================================
@@ -552,36 +552,36 @@ pub class BitVector[N] : BitVectorBase {
     // ========================================================================
 
     const func `[]`(index: u64): Bit {
-        assert!(index < #{N.value}, "Index out of bounds")
+        assert!(index < #{N}, "Index out of bounds")
         return getBit(index)
     }
 
     func at[I](): Bit {
-        require!(#{I.value} < #{N.value}, "Index out of bounds")
-        return getBit(#{I.value})
+        require!(#{I} < #{N}, "Index out of bounds")
+        return getBit(#{I})
     }
 
     func `[]=`(index: u64, value: Bit) {
-        assert!(index < #{N.value}, "Index out of bounds")
+        assert!(index < #{N}, "Index out of bounds")
         setBit(index, value)
     }
 
     func `[]=`(index: u64, value: wchar) {
-        assert!(index < #{N.value}, "Index out of bounds")
+        assert!(index < #{N}, "Index out of bounds")
         setBit(index, Bit(value))
     }
 
     func `[]=`(index: u64, value: u32) {
-        assert!(index < #{N.value}, "Index out of bounds")
+        assert!(index < #{N}, "Index out of bounds")
         setBit(index, Bit(value))
     }
 
     func set[I, T](value: T) {
-        require!(#{I.value} < #{N.value}, "Index out of bounds")
+        require!(#{I} < #{N}, "Index out of bounds")
         #if T == #Bit {
-            setBit(#{I.value}, value)
+            setBit(#{I}, value)
         } else #if T.isChar || T.isInteger {
-            setBit(#{I.value}, Bit(value))
+            setBit(#{I}, Bit(value))
         } else {
             error!("Unsupported type: #{t}", #T)
         }
@@ -589,7 +589,7 @@ pub class BitVector[N] : BitVectorBase {
 
     // Copy all bits from another BitVector (preserves this object's identity)
     func assign(other: &BitVector[N]): void {
-        for i in 0..#{N.value} {
+        for i in 0..#{N} {
             setBit(i, other.getBit(i))
         }
     }
@@ -608,10 +608,10 @@ pub class BitVector[N] : BitVectorBase {
     // ========================================================================
 
     func slice[L, H]() {
-        require!(#{L.value} < #{H.value} && #{H.value} <= #{N.value},
+        require!(#{L} < #{H} && #{H} <= #{N},
                  "Slice [L, H] must satisfy: 0 <= L < H <= N")
         #const NewN = H.value - L.value
-        return BitVector[#{NewN}](_bits, _offset + #{L.value})
+        return BitVector[#{NewN}](_bits, _offset + #{L})
     }
 
     // ========================================================================
@@ -661,7 +661,7 @@ pub class BitVector[N] : BitVectorBase {
     // ========================================================================
 
     func `==`(other: &const This): bool {
-        for i in 0..#{N.value} {
+        for i in 0..#{N} {
             if !(this.[i] == other.[i]) {
                 return false
             }
@@ -696,12 +696,12 @@ pub class BitVector[N] : BitVectorBase {
 
     // Zero extend to width M (M must be >= N)
     func zeroExtend[M]() {
-        require!(#{M.value} >= #{N.value}, "Target width M must be >= source width N")
-        #const MM = #{M.value}
+        require!(#{M} >= #{N}, "Target width M must be >= source width N")
+        #const MM = #{M}
         var result = BitVector[#{MM}]()
 
         // Copy original bits [N-1:0]
-        for i in 0..#{N.value} {
+        for i in 0..#{N} {
             result.[i] = this.[i]
         }
 
@@ -711,18 +711,18 @@ pub class BitVector[N] : BitVectorBase {
 
     // Sign extend to width M (M must be >= N)
     func signExtend[M]() {
-        require!(#{M.value} >= #{N.value}, "Target width M must be >= source width N")
-        #const MM = #{M.value}
+        require!(#{M} >= #{N}, "Target width M must be >= source width N")
+        #const MM = #{M}
         var result = BitVector[#{MM}]()
 
         // Copy original bits [N-1:0]
-        for i in 0..#{N.value} {
+        for i in 0..#{N} {
             result.[i] = this.[i]
         }
 
         // Replicate sign bit (MSB) into upper bits [M-1:N]
-        var signBit = this.[#{N.value} - 1]
-        for i in #{N.value}..#{MM} {
+        var signBit = this.[#{N} - 1]
+        for i in #{N}..#{MM} {
             result.[i] = signBit
         }
 
@@ -735,13 +735,13 @@ pub class BitVector[N] : BitVectorBase {
         var result = BitVector[#{TotalWidth}]()
 
         // Copy lower bits [M-1:0]
-        for i in 0..#{M.value} {
+        for i in 0..#{M} {
             result.[i] = lower.[i]
         }
 
         // Copy this (upper) bits [N+M-1:M]
-        for i in 0..#{N.value} {
-            result.[#{M.value} + i] = this.[i]
+        for i in 0..#{N} {
+            result.[#{M} + i] = this.[i]
         }
 
         return result

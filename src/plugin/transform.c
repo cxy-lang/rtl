@@ -53,6 +53,56 @@ static AstNode *makePortTypeWrapper(MemPool *pool,
     return pathNode;
 }
 
+// Create an array type: [ElementType, DimExpr]
+// e.g., [InPort[T], N] → ArrayType{ elementType: InPort[T], dim: N }
+static AstNode *makeArrayType(MemPool *pool,
+                               const FileLoc *loc,
+                               AstNode *elementType,
+                               AstNode *dimExpr)
+{
+    return makeAstNode(
+        pool,
+        loc,
+        &(AstNode){.tag = astArrayType,
+                   .flags = flgNone,
+                   .arrayType = {.elementType = elementType,
+                                 .dim = dimExpr}});
+}
+
+// Create a tuple type with N identical elements: (T, T, ..., T)
+// Note: This is a placeholder - we'll generate comptime for loops instead
+// For now, this is NOT used - we generate comptime code in constructor
+static AstNode *makeTupleType(MemPool *pool,
+                               const FileLoc *loc,
+                               AstNode *elementType,
+                               u64 count)
+{
+    // Build linked list of tuple elements
+    AstNode *elements = NULL;
+    AstNode *lastElem = NULL;
+
+    for (u64 i = 0; i < count; i++) {
+        AstNode *elem = deepCloneAstNode(pool, elementType);
+
+        if (elements == NULL) {
+            elements = elem;
+            lastElem = elem;
+        } else {
+            lastElem->next = elem;
+            lastElem = elem;
+        }
+    }
+
+    // Create tuple type
+    AstNode *tupleType = makeTupleTypeAst(pool,
+                                           loc,
+                                           flgNone,
+                                           elements,
+                                           NULL,
+                                           NULL);
+    return tupleType;
+}
+
 // ============================================================================
 // BitVector Type Detection and Transformation
 // ============================================================================
@@ -163,6 +213,12 @@ static void transformPortField(MemPool *pool, RtlPortInfo *port, StrPool *string
 
     // Clock ports: ensure they are reference types (&Clock)
     if (port->isClock) {
+        if (port->isArray) {
+            // Array of clocks not supported yet
+            // For now, just skip transformation - validation should catch this
+            return;
+        }
+
         // If not already a reference type, wrap it
         if (!nodeIs(field->structField.type, ReferenceType)) {
             AstNode *clockType = field->structField.type;
@@ -170,6 +226,101 @@ static void transformPortField(MemPool *pool, RtlPortInfo *port, StrPool *string
         }
         // Remove the @input attribute
         removeAttribute(field, rtl_input);
+        return;
+    }
+
+    // Handle array ports: @input x: [T, N] → x: [InPort[T], N]
+    if (port->isArray) {
+        cstring wrapperName = NULL;
+        cstring attrToRemove = NULL;
+
+        // Get element type (T from [T, N])
+        AstNode *elementType = port->arrayElementType;
+        AstNode *dimExpr = port->arrayDimExpr;
+
+        // Check if element type is BitVector[W] - special handling for bit ports
+        if (isBitVectorType(elementType)) {
+            // Transform: [BitVector[W], N] → [InBitPort[W], N]
+            // Constructor param: (BitSignal[W], ..., BitSignal[W]) - N times
+
+            AstNode *genericArgs = extractGenericArgs(elementType);
+
+            // Clone args for BitSignal[W] (constructor param)
+            AstNode *bitSignalArgs = deepCloneAstNode(pool, genericArgs);
+            AstNode *bitSignalType = makeBitSignalType(pool, &field->loc, bitSignalArgs);
+
+            // Clone args for BitPort[W] wrapper
+            AstNode *bitPortArgs = deepCloneAstNode(pool, genericArgs);
+
+            // Choose BitPort wrapper based on direction
+            switch (port->direction) {
+                case rtlPortIn:
+                    wrapperName = rtl_inbitport;
+                    attrToRemove = rtl_input;
+                    break;
+                case rtlPortOut:
+                    wrapperName = rtl_outbitport;
+                    attrToRemove = rtl_output;
+                    break;
+                case rtlPortInOut:
+                    wrapperName = rtl_inoutbitport;
+                    attrToRemove = rtl_inout;
+                    break;
+                default:
+                    return;
+            }
+
+            // Create InBitPort[W]
+            AstNode *wrappedElementType = makePortTypeWrapper(pool, &field->loc, wrapperName, bitPortArgs);
+
+            // Create [InBitPort[W], N]
+            AstNode *arrayType = makeArrayType(pool, &field->loc, wrappedElementType, dimExpr);
+
+            // Update field type
+            field->structField.type = arrayType;
+
+            // Store BitSignal[W] as param type (used for constructor signature)
+            port->paramType = bitSignalType;
+
+            // Store wrapper args for constructor body (need width W for port construction)
+            port->wrapperArgs = deepCloneAstNode(pool, genericArgs);
+
+        } else {
+            // Regular type: [T, N] → [InPort[T], N]
+            // Constructor param: (Signal[T], ..., Signal[T]) - N times
+
+            // Choose port wrapper based on direction
+            switch (port->direction) {
+                case rtlPortIn:
+                    wrapperName = rtl_inport;
+                    attrToRemove = rtl_input;
+                    break;
+                case rtlPortOut:
+                    wrapperName = rtl_outport;
+                    attrToRemove = rtl_output;
+                    break;
+                case rtlPortInOut:
+                    wrapperName = rtl_inoutport;
+                    attrToRemove = rtl_inout;
+                    break;
+                default:
+                    return;
+            }
+
+            // Create InPort[T]
+            AstNode *wrappedElementType = makePortTypeWrapper(pool, &field->loc, wrapperName, elementType);
+
+            // Create [InPort[T], N]
+            AstNode *arrayType = makeArrayType(pool, &field->loc, wrappedElementType, dimExpr);
+
+            // Update field type
+            field->structField.type = arrayType;
+
+            // paramType already set to elementType in discovery phase
+        }
+
+        // Remove the port direction attribute
+        removeAttribute(field, attrToRemove);
         return;
     }
 
@@ -271,6 +422,37 @@ static void transformSignalField(MemPool *pool, RtlSignalInfo *signal, StrPool *
 
     // Get the current type
     AstNode *currentType = field->structField.type;
+
+    // Handle array signals: @signal s: [T, N] → s: [Signal[T], N]
+    if (signal->isArray) {
+        AstNode *elementType = signal->arrayElementType;
+        AstNode *dimExpr = signal->arrayDimExpr;
+
+        // Check if element type is BitVector[W]
+        if (isBitVectorType(elementType)) {
+            // Transform: [BitVector[W], N] → [BitSignal[W], N]
+            AstNode *genericArgs = extractGenericArgs(elementType);
+            AstNode *bitSignalType = makeBitSignalType(pool, &field->loc, genericArgs);
+
+            // Create [BitSignal[W], N]
+            AstNode *arrayType = makeArrayType(pool, &field->loc, bitSignalType, dimExpr);
+            field->structField.type = arrayType;
+        } else {
+            // Regular type: [T, N] → [Signal[T], N]
+            AstNode *wrappedElementType = makePortTypeWrapper(pool, &field->loc, rtl_signal, elementType);
+
+            // Create [Signal[T], N]
+            AstNode *arrayType = makeArrayType(pool, &field->loc, wrappedElementType, dimExpr);
+            field->structField.type = arrayType;
+        }
+
+        // Remove default value (will be initialized in constructor)
+        field->structField.value = NULL;
+
+        // Remove @signal attribute
+        removeAttribute(field, rtl_signal_attr);
+        return;
+    }
 
     // Check if this is a BitVector type - if so, transform to BitSignal[N]
     if (isBitVectorType(currentType)) {
